@@ -72,7 +72,18 @@ def search(
             try:
                 results.extend(future.result())
             except Exception as e:
-                errors[name] = str(e)
+                # Shorten HTTP error messages for display in the UI
+                msg = str(e)
+                if "400" in msg:
+                    errors[name] = "Bad request — query may contain unsupported characters."
+                elif "429" in msg or "rate limit" in msg.lower():
+                    errors[name] = "Rate limit reached — try again in a few seconds."
+                elif "500" in msg or "502" in msg or "503" in msg:
+                    errors[name] = "Source temporarily unavailable (server error)."
+                elif "timeout" in msg.lower():
+                    errors[name] = "Request timed out."
+                else:
+                    errors[name] = msg
 
     return _deduplicate(results), errors
 

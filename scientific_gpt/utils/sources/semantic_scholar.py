@@ -7,16 +7,24 @@ _FIELDS = "title,authors,year,abstract,citationCount,url,externalIds,venue,tldr"
 SOURCE = "Semantic Scholar"
 
 
-def search(query: str, limit: int = 5, retries: int = 3) -> list[Paper]:
+def search(query: str, limit: int = 5, retries: int = 4) -> list[Paper]:
     params = {"query": query, "limit": limit, "fields": _FIELDS}
     for attempt in range(retries):
-        resp = requests.get(f"{_BASE}/paper/search", params=params, timeout=10)
+        try:
+            resp = requests.get(f"{_BASE}/paper/search", params=params, timeout=12)
+        except requests.exceptions.Timeout:
+            time.sleep(3)
+            continue
         if resp.status_code == 429:
-            time.sleep(2 ** attempt)
+            wait = [3, 6, 12, 20][attempt] if attempt < 4 else 20
+            time.sleep(wait)
+            continue
+        if resp.status_code >= 500:
+            time.sleep(3)
             continue
         resp.raise_for_status()
         return [_parse(p) for p in resp.json().get("data", [])]
-    raise RuntimeError("Semantic Scholar rate limit — try again shortly.")
+    raise RuntimeError("Semantic Scholar temporarily unavailable — try again in a moment.")
 
 
 def _parse(item: dict) -> Paper:

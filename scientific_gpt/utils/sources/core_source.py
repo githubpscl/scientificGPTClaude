@@ -19,10 +19,24 @@ def search(query: str, limit: int = 5) -> list[Paper]:
     api_key = os.getenv("CORE_API_KEY", "").strip()
     if not api_key:
         return []
-    headers = {"Authorization": f"Bearer {api_key}"}
-    params = {"q": query, "limit": limit}
-    resp = requests.get(f"{_BASE}/search/works", params=params, headers=headers, timeout=15)
-    resp.raise_for_status()
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    # Use POST /search/works to avoid trailing-slash redirect issues
+    payload = {"q": query, "limit": limit, "offset": 0}
+    try:
+        resp = requests.post(
+            f"{_BASE}/search/works", json=payload, headers=headers, timeout=15
+        )
+        if resp.status_code >= 500:
+            # Fall back to GET on server error
+            resp = requests.get(
+                f"{_BASE}/search/works",
+                params={"q": query, "limit": limit},
+                headers=headers,
+                timeout=15,
+            )
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        raise RuntimeError(f"CORE API error: {e}") from e
     return [_parse(w) for w in resp.json().get("results", [])]
 
 

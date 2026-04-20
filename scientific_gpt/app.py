@@ -6,6 +6,7 @@ from utils.pdf_handler import extract_text_from_pdf
 from utils.rag import build_vectorstore, load_vectorstore, query_rag
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
 from utils.sources.crossref import lookup_doi
+from utils.answer_engine import answer_from_papers
 
 load_dotenv()
 
@@ -16,6 +17,8 @@ st.set_page_config(page_title="Scientific GPT", page_icon="🔬", layout="wide")
 for key, default in [
     ("search_results", []),
     ("search_errors", {}),
+    ("answer_text", None),
+    ("answer_papers", []),
     ("vectorstore", None),
     ("indexed_files", []),
 ]:
@@ -125,65 +128,136 @@ with tab_rag:
             st.markdown(answer)
 
 # ════════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Multi-Source Search
+# TAB 2 — Multi-Source Search + AI Answer
 # ════════════════════════════════════════════════════════════════════════════════
 with tab_search:
     st.header("Multi-Source Academic Search")
 
-    # ── Query + options row ───────────────────────────────────────────────────
+    # ── Research question (drives the AI answer) ──────────────────────────────
+    research_question = st.text_area(
+        "Research question",
+        placeholder="e.g. What are the advantages of transformer architectures over RNNs?",
+        height=90,
+        help="Gemini will write a cited academic answer based on the found papers.",
+    )
+
+    # ── Keyword query + per-source limit ─────────────────────────────────────
     col_q, col_n = st.columns([4, 1])
     with col_q:
-        query = st.text_input("Search query", placeholder="e.g. transformer attention mechanism")
+        query = st.text_input(
+            "Search keywords",
+            placeholder="e.g. transformer attention mechanism",
+            help="Keywords sent to the databases. Can be the same as your question or more specific.",
+        )
     with col_n:
         limit = st.number_input("Per source", min_value=1, max_value=15, value=5)
 
     # ── Source selection ──────────────────────────────────────────────────────
     st.markdown("**Sources**")
-    all_sources = available_sources()
-    cols = st.columns(len(all_sources))
+    all_srcs = available_sources()
+    src_cols = st.columns(len(all_srcs))
     selected_sources: list[str] = []
-    for col, name in zip(cols, all_sources):
-        available = is_source_available(name)
-        color = SOURCE_COLORS.get(name, "#888")
-        label = name if available else f"{name} *(key needed)*"
-        checked = col.checkbox(label, value=available, disabled=not available, key=f"src_{name}")
-        if checked and available:
+    for col, name in zip(src_cols, all_srcs):
+        avail = is_source_available(name)
+        label = name if avail else f"{name} *(key needed)*"
+        if col.checkbox(label, value=avail, disabled=not avail, key=f"src_{name}") and avail:
             selected_sources.append(name)
 
-    if st.button("🔍 Search All Selected Sources", type="primary"):
+    if st.button("🔍 Search & Answer", type="primary"):
         if not query.strip():
-            st.warning("Please enter a search query.")
+            st.warning("Please enter search keywords.")
         elif not selected_sources:
             st.warning("Please select at least one source.")
         else:
             with st.spinner(f"Searching {len(selected_sources)} source(s) in parallel…"):
                 papers, errors = multi_search(query, selected_sources, int(limit))
-                st.session_state.search_results = papers
-                st.session_state.search_errors = errors
+            st.session_state.search_results = papers
+            st.session_state.search_errors = errors
+            st.session_state.answer_text = None
+            st.session_state.answer_papers = []
 
-    # ── Error notices ─────────────────────────────────────────────────────────
+            if papers and research_question.strip():
+                with st.spinner(f"Re-ranking {len(papers)} papers by relevance & generating answer…"):
+                    try:
+                        body, ranked = answer_from_papers(
+                            research_question, papers, api_key, citation_style
+                        )
+                        st.session_state.answer_text = body
+                        st.session_state.answer_papers = ranked
+                    except Exception as e:
+                        st.session_state.answer_text = f"⚠️ Answer generation failed: {e}"
+                        st.session_state.answer_papers = []
+
+    # ── Source errors ─────────────────────────────────────────────────────────
     for src, err in st.session_state.search_errors.items():
         st.warning(f"**{src}** failed: {err}")
 
-    # ── Results ───────────────────────────────────────────────────────────────
     papers = st.session_state.search_results
+
+    # ── AI Answer + References ────────────────────────────────────────────────
+    if st.session_state.get("answer_text"):
+        answer_papers = st.session_state.answer_papers
+        st.divider()
+        st.markdown("## 🧠 Answer")
+        if answer_papers and papers:
+            st.caption(
+                f"Cited answer built from the **{len(answer_papers)}** most relevant "
+                f"of {len(papers)} retrieved papers (semantic re-ranking via Gemini embeddings)."
+            )
+        st.markdown(st.session_state.answer_text)
+
+        # References section — app-rendered so links are clickable
+        st.markdown("---")
+        st.markdown("## References")
+        for i, p in enumerate(answer_papers, 1):
+            citation = p.format_citation(citation_style)
+            color = SOURCE_COLORS.get(p.source, "#888")
+            badge_html = (
+                f"<span style='background:{color};color:white;"
+                f"padding:1px 6px;border-radius:3px;font-size:0.72em'>{p.source}</span>"
+            )
+            # Link buttons
+            links = []
+            if p.url:
+                links.append(f"[🔗 Open]({p.url})")
+            if p.pdf_url and p.pdf_url != p.url:
+                links.append(f"[📄 PDF]({p.pdf_url})")
+            link_str = " &nbsp; ".join(links)
+
+            st.markdown(
+                f"**[{i}]** {citation} &nbsp; {badge_html} &nbsp; {link_str}",
+                unsafe_allow_html=True,
+            )
+
+        # Export
+        export_text = (st.session_state.answer_text + "\n\n## References\n\n" +
+                       "\n".join(f"[{i}] {p.format_citation(citation_style)}"
+                                 for i, p in enumerate(answer_papers, 1)))
+        st.download_button(
+            "📥 Export Answer + References",
+            data=export_text,
+            file_name=f"answer_{citation_style}.txt",
+            mime="text/plain",
+        )
+
+    # ── All found papers (collapsible) ────────────────────────────────────────
     if papers:
-        # Source breakdown
+        st.divider()
+
+        # Source badge summary
         src_counts: dict[str, int] = {}
         for p in papers:
             src_counts[p.source] = src_counts.get(p.source, 0) + 1
-
         summary_parts = [
             f"<span style='background:{SOURCE_COLORS.get(s,'#888')};color:white;"
             f"padding:2px 8px;border-radius:4px;font-size:0.8em'>{s} {n}</span>"
             for s, n in src_counts.items()
         ]
         st.markdown(
-            f"**{len(papers)} unique result(s)** &nbsp; " + " &nbsp; ".join(summary_parts),
+            f"**{len(papers)} unique papers found** &nbsp; " + " &nbsp; ".join(summary_parts),
             unsafe_allow_html=True,
         )
 
-        # Export all citations
         all_citations = "\n\n".join(
             f"[{i}] {p.format_citation(citation_style)}" for i, p in enumerate(papers, 1)
         )
@@ -194,47 +268,31 @@ with tab_search:
             mime="text/plain",
         )
 
-        st.divider()
-
+        st.markdown("**All Results**")
         for i, paper in enumerate(papers, 1):
             color = SOURCE_COLORS.get(paper.source, "#888")
             badge = (
                 f"<span style='background:{color};color:white;"
-                f"padding:1px 7px;border-radius:3px;font-size:0.75em'>"
-                f"{paper.source}</span>"
+                f"padding:1px 7px;border-radius:3px;font-size:0.75em'>{paper.source}</span>"
             )
             year_str = f" ({paper.year})" if paper.year else ""
-            title_md = f"{i}. {paper.title}{year_str} &nbsp; {badge}"
-
             with st.expander(f"{i}. {paper.title}{year_str}  [{paper.source}]"):
-                # Header row
-                st.markdown(title_md, unsafe_allow_html=True)
+                st.markdown(f"**{paper.title}**{year_str} &nbsp; {badge}", unsafe_allow_html=True)
 
-                meta_cols = st.columns(4)
-                meta_cols[0].markdown(
-                    f"**Authors**  \n{', '.join(paper.authors[:3]) + (' et al.' if len(paper.authors) > 3 else '') or '—'}"
-                )
-                meta_cols[1].markdown(f"**Venue**  \n{paper.venue or '—'}")
-                meta_cols[2].markdown(f"**Citations**  \n{paper.citation_count if paper.citation_count is not None else '—'}")
-                meta_cols[3].markdown(f"**PDF**  \n{'[Download](' + paper.pdf_url + ')' if paper.pdf_url else '—'}")
+                m = st.columns(4)
+                m[0].markdown(f"**Authors**  \n{', '.join(paper.authors[:3]) + (' et al.' if len(paper.authors) > 3 else '') or '—'}")
+                m[1].markdown(f"**Venue**  \n{paper.venue or '—'}")
+                m[2].markdown(f"**Citations**  \n{paper.citation_count if paper.citation_count is not None else '—'}")
+                m[3].markdown(f"**PDF**  \n{'[Download](' + paper.pdf_url + ')' if paper.pdf_url else '—'}")
 
-                # TLDR (Semantic Scholar)
                 if paper.tldr:
                     st.info(f"**TL;DR** {paper.tldr}")
-
-                # Abstract
                 if paper.abstract:
-                    with st.container():
-                        st.markdown("**Abstract**")
-                        st.markdown(paper.abstract)
-
+                    st.markdown("**Abstract**")
+                    st.markdown(paper.abstract)
                 if paper.url:
                     st.markdown(f"**Link:** [{paper.url}]({paper.url})")
-
-                # Citation (reacts to sidebar style change instantly)
-                citation_text = paper.format_citation(citation_style)
-                st.markdown(f"**{citation_style} Citation**")
-                st.code(citation_text, language=None)
+                st.code(paper.format_citation(citation_style), language=None)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 3 — DOI Lookup (Crossref)

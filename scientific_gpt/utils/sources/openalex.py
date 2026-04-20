@@ -5,9 +5,10 @@ _BASE = "https://api.openalex.org/works"
 _HEADERS = {"User-Agent": "ScientificGPT/1.0 (mailto:scientificgpt@research.app)"}
 SOURCE = "OpenAlex"
 
+# host_venue was removed in OpenAlex v2 — venue now lives in primary_location.source
 _SELECT = (
     "title,authorships,publication_year,abstract_inverted_index,"
-    "doi,primary_location,cited_by_count,open_access,best_oa_location,host_venue"
+    "doi,primary_location,cited_by_count,open_access,best_oa_location"
 )
 
 
@@ -26,16 +27,16 @@ def _parse(w: dict) -> Paper:
         doi = doi[len("http://doi.org/"):]
 
     # Best open-access PDF
-    oa = w.get("best_oa_location") or w.get("open_access") or {}
+    oa = w.get("best_oa_location") or {}
     pdf_url = oa.get("pdf_url") or oa.get("landing_page_url")
 
     # Landing page
     primary = w.get("primary_location") or {}
     url = primary.get("landing_page_url") or (f"https://doi.org/{doi}" if doi else "")
 
-    # Venue
-    venue_obj = w.get("host_venue") or {}
-    venue = venue_obj.get("display_name") or primary.get("source", {}).get("display_name", "")
+    # Venue from primary_location.source (current OpenAlex v2 structure)
+    source_obj = primary.get("source") or {}
+    venue = source_obj.get("display_name") or ""
 
     return Paper(
         title=w.get("title") or "",
