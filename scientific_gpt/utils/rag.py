@@ -29,10 +29,18 @@ def build_vectorstore(text: str, api_key: str) -> FAISS:
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = splitter.split_text(text)
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
+        model="models/text-embedding-004",
         google_api_key=api_key,
     )
-    vs = FAISS.from_texts(chunks, embeddings)
+    # Batch embeddings — Gemini rejects >100 texts per call and large PDFs
+    # easily produce 500+ chunks.
+    BATCH = 90
+    if len(chunks) <= BATCH:
+        vs = FAISS.from_texts(chunks, embeddings)
+    else:
+        vs = FAISS.from_texts(chunks[:BATCH], embeddings)
+        for i in range(BATCH, len(chunks), BATCH):
+            vs.add_texts(chunks[i:i + BATCH])
     vs.save_local(VECTORSTORE_PATH)
     return vs
 
@@ -41,7 +49,7 @@ def load_vectorstore(api_key: str) -> FAISS | None:
     if not os.path.exists(VECTORSTORE_PATH):
         return None
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
+        model="models/text-embedding-004",
         google_api_key=api_key,
     )
     return FAISS.load_local(
