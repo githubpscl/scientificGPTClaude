@@ -96,10 +96,17 @@ with tab_rag:
                 if not full_text.strip():
                     st.error("No text could be extracted.")
                 else:
-                    vs = build_vectorstore(full_text, api_key)
-                    st.session_state.vectorstore = vs
-                    st.session_state.indexed_files = names
-                    st.success(f"Index built from: {', '.join(f'**{n}**' for n in names)}")
+                    try:
+                        vs = build_vectorstore(full_text, api_key)
+                        st.session_state.vectorstore = vs
+                        st.session_state.indexed_files = names
+                        st.success(f"Index built from: {', '.join(f'**{n}**' for n in names)}")
+                    except Exception as e:
+                        # Surface the real error — Streamlit Cloud redacts uncaught errors
+                        import traceback
+                        st.error(f"**Embedding failed:** {type(e).__name__}: {e}")
+                        with st.expander("Full traceback"):
+                            st.code(traceback.format_exc())
 
     st.divider()
     rag_question = st.text_area(
@@ -185,7 +192,11 @@ with tab_search:
                         st.session_state.answer_text = body
                         st.session_state.answer_papers = ranked
                     except Exception as e:
-                        st.session_state.answer_text = f"⚠️ Answer generation failed: {e}"
+                        import traceback
+                        st.session_state.answer_text = (
+                            f"⚠️ **Answer generation failed:** {type(e).__name__}: {e}\n\n"
+                            f"```\n{traceback.format_exc()[-800:]}\n```"
+                        )
                         st.session_state.answer_papers = []
 
     # ── Source errors ─────────────────────────────────────────────────────────

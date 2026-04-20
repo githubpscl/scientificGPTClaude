@@ -41,7 +41,7 @@ def rerank(
         return papers, [1.0]
 
     emb = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004", google_api_key=api_key
+        model="models/gemini-embedding-001", google_api_key=api_key
     )
 
     # Task-type "retrieval_query" + "retrieval_document" would be ideal but
