@@ -1,12 +1,16 @@
 import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
+
+from .llm_providers import LLMConfig, get_chat_llm, get_embeddings
 
 VECTORSTORE_PATH = "vectorstore/faiss_index"
 
-# Academic system prompt — citation numbers map to numbered context chunks passed in.
-# The {citation_style} token is filled at query time so the reference list format adapts.
+
+class EmbeddingsUnavailableError(RuntimeError):
+    """Raised when the selected provider has no embeddings endpoint."""
+
+
 _SYSTEM = """You are a rigorous scientific research assistant. Follow these rules strictly:
 
 1. Answer in formal, objective academic language.
@@ -25,15 +29,22 @@ Question: {question}
 Answer (with inline [N] citations and a ## References section at the end):"""
 
 
-def build_vectorstore(text: str, api_key: str) -> FAISS:
+def _require_embeddings(config: LLMConfig):
+    emb = get_embeddings(config)
+    if emb is None:
+        raise EmbeddingsUnavailableError(
+            f"The provider '{config.provider}' does not offer embeddings. "
+            f"PDF indexing requires an embedding model — please switch to "
+            f"Google Gemini or OpenAI for this feature."
+        )
+    return emb
+
+
+def build_vectorstore(text: str, config: LLMConfig) -> FAISS:
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = splitter.split_text(text)
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=api_key,
-    )
-    # Batch embeddings — Gemini rejects >100 texts per call and large PDFs
-    # easily produce 500+ chunks.
+    embeddings = _require_embeddings(config)
+    # Batch — Gemini rejects >100 texts per call; OpenAI is higher but 90 is safe for both.
     BATCH = 90
     if len(chunks) <= BATCH:
         vs = FAISS.from_texts(chunks, embeddings)
@@ -45,13 +56,10 @@ def build_vectorstore(text: str, api_key: str) -> FAISS:
     return vs
 
 
-def load_vectorstore(api_key: str) -> FAISS | None:
+def load_vectorstore(config: LLMConfig) -> FAISS | None:
     if not os.path.exists(VECTORSTORE_PATH):
         return None
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=api_key,
-    )
+    embeddings = _require_embeddings(config)
     return FAISS.load_local(
         VECTORSTORE_PATH, embeddings, allow_dangerous_deserialization=True
     )
@@ -60,16 +68,10 @@ def load_vectorstore(api_key: str) -> FAISS | None:
 def query_rag(
     question: str,
     vectorstore: FAISS,
-    api_key: str,
+    config: LLMConfig,
     citation_style: str = "APA",
     source_labels: list[str] | None = None,
 ) -> str:
-    """Query the RAG chain.
-
-    source_labels: optional list of human-readable labels for each retrieved chunk,
-    e.g. ["Smith et al. (2023), p.3", ...]. When provided they are embedded in the
-    context so the model can build accurate reference entries.
-    """
     docs = vectorstore.similarity_search(question, k=4)
 
     context_parts = []
@@ -86,10 +88,6 @@ def query_rag(
         question=question,
     )
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        google_api_key=api_key,
-        temperature=0.1,
-    )
+    llm = get_chat_llm(config, temperature=0.1)
     response = llm.invoke(prompt)
     return response.content

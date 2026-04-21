@@ -3,10 +3,16 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from utils.pdf_handler import extract_text_from_pdf
-from utils.rag import build_vectorstore, load_vectorstore, query_rag
+from utils.rag import (
+    build_vectorstore,
+    load_vectorstore,
+    query_rag,
+    EmbeddingsUnavailableError,
+)
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import answer_from_papers
+from utils.llm_providers import LLMConfig, PROVIDERS, GOOGLE, OPENAI, ANTHROPIC
 
 load_dotenv()
 
@@ -25,25 +31,64 @@ for key, default in [
     if key not in st.session_state:
         st.session_state[key] = default
 
+
+def _default_gemini_key() -> str:
+    """Silently resolve the bundled Gemini key from secrets → env."""
+    try:
+        k = st.secrets.get("GOOGLE_API_KEY", "")
+        if k:
+            return k
+    except Exception:
+        pass
+    return os.getenv("GOOGLE_API_KEY", "")
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ Settings")
 
-    # Prefer Streamlit Cloud secrets → .env → user input (no default hardcoded)
-    default_key = ""
-    try:
-        default_key = st.secrets.get("GOOGLE_API_KEY", "")
-    except Exception:
-        pass
-    if not default_key:
-        default_key = os.getenv("GOOGLE_API_KEY", "")
-
-    api_key = st.text_input(
-        "Google Gemini API Key",
-        value=default_key,
-        type="password",
-        help="Paste here, or set GOOGLE_API_KEY in Streamlit Cloud → Settings → Secrets.",
+    use_own_key = st.checkbox(
+        "Use my own API key",
+        value=False,
+        help="By default the app uses a bundled Google Gemini key. "
+             "Enable this to use your own key with ChatGPT, Claude or Gemini.",
     )
+
+    llm_config: LLMConfig | None = None
+    config_error: str | None = None
+
+    if use_own_key:
+        provider = st.selectbox(
+            "Provider",
+            options=list(PROVIDERS.keys()),
+            index=0,
+            help="Pick which LLM backend your key belongs to.",
+        )
+        meta = PROVIDERS[provider]
+        user_key = st.text_input(
+            meta["key_label"],
+            value="",
+            type="password",
+            help=f"Get a key at {meta['key_hint']}",
+        )
+        if user_key.strip():
+            llm_config = LLMConfig(provider=provider, api_key=user_key.strip())
+        else:
+            config_error = "Enter your API key to continue."
+        if not meta["has_embeddings"]:
+            st.info(
+                f"ℹ️ {provider} has no embedding model — PDF indexing and "
+                f"semantic re-ranking will be skipped for this provider."
+            )
+    else:
+        default_key = _default_gemini_key()
+        if default_key:
+            llm_config = LLMConfig(provider=GOOGLE, api_key=default_key)
+        else:
+            config_error = (
+                "No bundled API key is configured. Enable *Use my own API key* "
+                "in the sidebar to continue."
+            )
 
     st.divider()
 
@@ -65,14 +110,17 @@ with st.sidebar:
         st.caption("No PDFs indexed yet.")
 
     st.divider()
-    st.caption("Scientific GPT · Gemini 1.5 Flash · FAISS\nSemantic Scholar · OpenAlex · arXiv · PubMed · Crossref · CORE")
+    st.caption(
+        "Scientific GPT · Gemini · ChatGPT · Claude · FAISS\n"
+        "Semantic Scholar · OpenAlex · arXiv · PubMed · Crossref · CORE"
+    )
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔬 Scientific GPT")
 st.markdown("*AI-powered academic research assistant — 6 sources, one search*")
 
-if not api_key:
-    st.warning("Please enter your Google Gemini API key in the sidebar.")
+if llm_config is None:
+    st.warning(config_error or "API key not configured.")
     st.stop()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -84,65 +132,74 @@ tab_rag, tab_search, tab_doi = st.tabs(["📄 PDF / RAG", "🔍 Multi-Source Sea
 with tab_rag:
     st.header("Ask Questions About Your PDFs")
     st.caption(
-        f"Upload papers → FAISS index via Gemini Embeddings → answers with "
+        f"Upload papers → FAISS index via embeddings → answers with "
         f"inline **[N]** citations and a **{citation_style}** reference list."
     )
 
-    uploaded_files = st.file_uploader(
-        "Upload PDF papers", type=["pdf"], accept_multiple_files=True
-    )
+    if not llm_config.has_embeddings:
+        st.error(
+            f"**{llm_config.provider}** does not provide an embeddings endpoint. "
+            f"Switch to Google Gemini or OpenAI in the sidebar to use PDF indexing."
+        )
+    else:
+        uploaded_files = st.file_uploader(
+            "Upload PDF papers", type=["pdf"], accept_multiple_files=True
+        )
 
-    if uploaded_files:
-        if st.button("📥 Build / Update FAISS Index", type="primary"):
-            with st.spinner("Extracting text and computing Gemini embeddings…"):
-                full_text, names = "", []
-                for f in uploaded_files:
-                    t = extract_text_from_pdf(f)
-                    if t.strip():
-                        full_text += f"\n\n=== {f.name} ===\n\n" + t
-                        names.append(f.name)
+        if uploaded_files:
+            if st.button("📥 Build / Update FAISS Index", type="primary"):
+                with st.spinner("Extracting text and computing embeddings…"):
+                    full_text, names = "", []
+                    for f in uploaded_files:
+                        t = extract_text_from_pdf(f)
+                        if t.strip():
+                            full_text += f"\n\n=== {f.name} ===\n\n" + t
+                            names.append(f.name)
+                        else:
+                            st.warning(f"No text extracted from **{f.name}** — skipped.")
+                    if not full_text.strip():
+                        st.error("No text could be extracted.")
                     else:
-                        st.warning(f"No text extracted from **{f.name}** — skipped.")
-                if not full_text.strip():
-                    st.error("No text could be extracted.")
-                else:
-                    try:
-                        vs = build_vectorstore(full_text, api_key)
-                        st.session_state.vectorstore = vs
-                        st.session_state.indexed_files = names
-                        st.success(f"Index built from: {', '.join(f'**{n}**' for n in names)}")
-                    except Exception as e:
-                        # Surface the real error — Streamlit Cloud redacts uncaught errors
-                        import traceback
-                        st.error(f"**Embedding failed:** {type(e).__name__}: {e}")
-                        with st.expander("Full traceback"):
-                            st.code(traceback.format_exc())
+                        try:
+                            vs = build_vectorstore(full_text, llm_config)
+                            st.session_state.vectorstore = vs
+                            st.session_state.indexed_files = names
+                            st.success(f"Index built from: {', '.join(f'**{n}**' for n in names)}")
+                        except Exception as e:
+                            import traceback
+                            st.error(f"**Embedding failed:** {type(e).__name__}: {e}")
+                            with st.expander("Full traceback"):
+                                st.code(traceback.format_exc())
 
-    st.divider()
-    rag_question = st.text_area(
-        "Research question",
-        placeholder="e.g. What are the main limitations of the proposed methodology?",
-        height=100,
-    )
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
-        run_rag = st.button("🧠 Ask (RAG)", type="primary")
-    with col_info:
-        st.caption(f"Style in sidebar = **{citation_style}** — change applies to next query.")
+        st.divider()
+        rag_question = st.text_area(
+            "Research question",
+            placeholder="e.g. What are the main limitations of the proposed methodology?",
+            height=100,
+        )
+        col_btn, col_info = st.columns([1, 3])
+        with col_btn:
+            run_rag = st.button("🧠 Ask (RAG)", type="primary")
+        with col_info:
+            st.caption(f"Style in sidebar = **{citation_style}** — change applies to next query.")
 
-    if run_rag:
-        vs = st.session_state.vectorstore or load_vectorstore(api_key)
-        if vs is None:
-            st.warning("No FAISS index. Upload and process PDFs first.")
-        elif not rag_question.strip():
-            st.warning("Please enter a question.")
-        else:
-            if st.session_state.vectorstore is None:
-                st.session_state.vectorstore = vs
-            with st.spinner("Querying Gemini…"):
-                answer = query_rag(rag_question, vs, api_key, citation_style)
-            st.markdown("### Answer")
-            st.markdown(answer)
+        if run_rag:
+            try:
+                vs = st.session_state.vectorstore or load_vectorstore(llm_config)
+            except EmbeddingsUnavailableError as e:
+                st.error(str(e))
+                vs = None
+            if vs is None:
+                st.warning("No FAISS index. Upload and process PDFs first.")
+            elif not rag_question.strip():
+                st.warning("Please enter a question.")
+            else:
+                if st.session_state.vectorstore is None:
+                    st.session_state.vectorstore = vs
+                with st.spinner(f"Querying {llm_config.provider}…"):
+                    answer = query_rag(rag_question, vs, llm_config, citation_style)
+                st.markdown("### Answer")
+                st.markdown(answer)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Multi-Source Search + AI Answer
@@ -150,15 +207,13 @@ with tab_rag:
 with tab_search:
     st.header("Multi-Source Academic Search")
 
-    # ── Research question (drives the AI answer) ──────────────────────────────
     research_question = st.text_area(
         "Research question",
         placeholder="e.g. What are the advantages of transformer architectures over RNNs?",
         height=90,
-        help="Gemini will write a cited academic answer based on the found papers.",
+        help=f"{llm_config.provider} will write a cited academic answer based on the found papers.",
     )
 
-    # ── Keyword query + per-source limit ─────────────────────────────────────
     col_q, col_n = st.columns([4, 1])
     with col_q:
         query = st.text_input(
@@ -169,7 +224,6 @@ with tab_search:
     with col_n:
         limit = st.number_input("Per source", min_value=1, max_value=15, value=5)
 
-    # ── Source selection ──────────────────────────────────────────────────────
     st.markdown("**Sources**")
     all_srcs = available_sources()
     src_cols = st.columns(len(all_srcs))
@@ -194,10 +248,14 @@ with tab_search:
             st.session_state.answer_papers = []
 
             if papers and research_question.strip():
-                with st.spinner(f"Re-ranking {len(papers)} papers by relevance & generating answer…"):
+                rerank_note = (
+                    "Re-ranking" if llm_config.has_embeddings
+                    else "Preparing (no embeddings available for re-ranking)"
+                )
+                with st.spinner(f"{rerank_note} {len(papers)} papers & generating answer…"):
                     try:
                         body, ranked = answer_from_papers(
-                            research_question, papers, api_key, citation_style
+                            research_question, papers, llm_config, citation_style
                         )
                         st.session_state.answer_text = body
                         st.session_state.answer_papers = ranked
@@ -209,25 +267,27 @@ with tab_search:
                         )
                         st.session_state.answer_papers = []
 
-    # ── Source errors ─────────────────────────────────────────────────────────
     for src, err in st.session_state.search_errors.items():
         st.warning(f"**{src}** failed: {err}")
 
     papers = st.session_state.search_results
 
-    # ── AI Answer + References ────────────────────────────────────────────────
     if st.session_state.get("answer_text"):
         answer_papers = st.session_state.answer_papers
         st.divider()
         st.markdown("## 🧠 Answer")
         if answer_papers and papers:
+            rank_hint = (
+                "semantic re-ranking via embeddings"
+                if llm_config.has_embeddings
+                else "source order (no embeddings available for this provider)"
+            )
             st.caption(
                 f"Cited answer built from the **{len(answer_papers)}** most relevant "
-                f"of {len(papers)} retrieved papers (semantic re-ranking via Gemini embeddings)."
+                f"of {len(papers)} retrieved papers ({rank_hint})."
             )
         st.markdown(st.session_state.answer_text)
 
-        # References section — app-rendered so links are clickable
         st.markdown("---")
         st.markdown("## References")
         for i, p in enumerate(answer_papers, 1):
@@ -237,7 +297,6 @@ with tab_search:
                 f"<span style='background:{color};color:white;"
                 f"padding:1px 6px;border-radius:3px;font-size:0.72em'>{p.source}</span>"
             )
-            # Link buttons
             links = []
             if p.url:
                 links.append(f"[🔗 Open]({p.url})")
@@ -250,7 +309,6 @@ with tab_search:
                 unsafe_allow_html=True,
             )
 
-        # Export
         export_text = (st.session_state.answer_text + "\n\n## References\n\n" +
                        "\n".join(f"[{i}] {p.format_citation(citation_style)}"
                                  for i, p in enumerate(answer_papers, 1)))
@@ -261,11 +319,9 @@ with tab_search:
             mime="text/plain",
         )
 
-    # ── All found papers (collapsible) ────────────────────────────────────────
     if papers:
         st.divider()
 
-        # Source badge summary
         src_counts: dict[str, int] = {}
         for p in papers:
             src_counts[p.source] = src_counts.get(p.source, 0) + 1

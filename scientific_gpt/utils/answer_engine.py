@@ -1,8 +1,8 @@
-"""Generate an academic answer from a list of Paper objects using Gemini."""
+"""Generate an academic answer from a list of Paper objects."""
 from __future__ import annotations
-from langchain_google_genai import ChatGoogleGenerativeAI
 from .sources.base import Paper
 from .reranker import filter_substantive, rerank
+from .llm_providers import LLMConfig, get_chat_llm
 
 _PROMPT = """\
 You are a rigorous scientific research assistant. Answer the question using ONLY \
@@ -33,30 +33,24 @@ Academic answer (inline [N] citations only, no reference list at the end):"""
 def answer_from_papers(
     question: str,
     papers: list[Paper],
-    api_key: str,
+    config: LLMConfig,
     citation_style: str = "APA",
     max_papers: int = 8,
 ) -> tuple[str, list[Paper]]:
     """Filter → semantically rerank → generate cited answer.
 
-    Returns:
-        (answer_text, ranked_papers) — ranked_papers is used to render the
-        References section in the UI. Only papers that passed the relevance
-        threshold are included.
+    Returns (answer_text, ranked_papers). ranked_papers drives the References
+    section in the UI; only papers that passed the relevance threshold are kept.
     """
-    # Stage 1: drop papers without substantive abstracts — they can't be judged
     substantive = filter_substantive(papers)
 
-    # Stage 2: semantic re-ranking against the research question
     if substantive:
-        ranked, scores = rerank(question, substantive, api_key, top_k=max_papers)
-        # If the floor was too strict and everything got filtered, fall back
+        ranked, scores = rerank(question, substantive, config, top_k=max_papers)
         if not ranked:
             ranked, scores = rerank(
-                question, substantive, api_key, top_k=max_papers, apply_floor=False
+                question, substantive, config, top_k=max_papers, apply_floor=False
             )
     else:
-        # Fallback: no abstracts at all — give LLM whatever we have
         ranked = papers[:max_papers]
         scores = [0.0] * len(ranked)
 
@@ -64,7 +58,6 @@ def answer_from_papers(
         return ("The search returned no papers with sufficient metadata to answer "
                 "the question. Please refine the search keywords or try other sources."), []
 
-    # Stage 3: build context blocks
     source_blocks = []
     for i, (p, s) in enumerate(zip(ranked, scores), 1):
         authors = ", ".join(p.authors[:3]) + (" et al." if len(p.authors) > 3 else "")
@@ -82,9 +75,5 @@ def answer_from_papers(
         question=question,
     )
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        google_api_key=api_key,
-        temperature=0.1,
-    )
+    llm = get_chat_llm(config, temperature=0.1)
     return llm.invoke(prompt).content, ranked

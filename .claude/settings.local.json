@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(venv/Scripts/python.exe *)"
+      "Bash(venv/Scripts/python.exe *)",
+      "Bash(python -m py_compile app.py utils/llm_providers.py utils/rag.py utils/answer_engine.py utils/reranker.py)"
     ]
   }
 }
