@@ -1,0 +1,27 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.key
+secrets.toml
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.Python
+
+# FAISS index
+vectorstore/faiss_index/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

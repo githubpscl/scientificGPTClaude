@@ -29,10 +29,20 @@ for key, default in [
 with st.sidebar:
     st.title("⚙️ Settings")
 
+    # Prefer Streamlit Cloud secrets → .env → user input (no default hardcoded)
+    default_key = ""
+    try:
+        default_key = st.secrets.get("GOOGLE_API_KEY", "")
+    except Exception:
+        pass
+    if not default_key:
+        default_key = os.getenv("GOOGLE_API_KEY", "")
+
     api_key = st.text_input(
         "Google Gemini API Key",
-        value=os.getenv("GOOGLE_API_KEY", ""),
+        value=default_key,
         type="password",
+        help="Paste here, or set GOOGLE_API_KEY in Streamlit Cloud → Settings → Secrets.",
     )
 
     st.divider()
