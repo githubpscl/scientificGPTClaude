@@ -7,7 +7,7 @@ most relevant ones before feeding them to the answer-generation LLM.
 from __future__ import annotations
 import numpy as np
 from .sources.base import Paper
-from .llm_providers import LLMChain
+from .llm_backend import LLMChain
 
 _RELEVANCE_FLOOR = 0.55
 _MIN_ABSTRACT_LEN = 120

@@ -2,7 +2,7 @@ import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 
-from .llm_providers import LLMChain, get_embeddings
+from .llm_backend import LLMChain, get_embeddings
 
 VECTORSTORE_PATH = "vectorstore/faiss_index"
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from .sources.base import Paper
 from .reranker import filter_substantive, rerank
-from .llm_providers import LLMChain
+from .llm_backend import LLMChain
 
 _PROMPT = """\
 You are a rigorous scientific research assistant. Answer the question using ONLY \

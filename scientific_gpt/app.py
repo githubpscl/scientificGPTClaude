@@ -12,7 +12,7 @@ from utils.rag import (
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import answer_from_papers
-from utils.llm_providers import (
+from utils.llm_backend import (
     LLMConfig, LLMChain, PROVIDERS, GOOGLE, OPENAI, ANTHROPIC, GROQ,
 )
 
