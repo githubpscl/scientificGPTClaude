@@ -4,7 +4,15 @@
       "Bash(venv/Scripts/python.exe *)",
       "Bash(python -m py_compile app.py utils/llm_providers.py utils/rag.py utils/answer_engine.py utils/reranker.py)",
       "Bash(ls -la .env*)",
-      "Bash(ls -la .streamlit/)"
+      "Bash(ls -la .streamlit/)",
+      "Bash(git show *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('/tmp/remote_llm.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Read(//tmp/**)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(r'C:/tmp/remote_llm.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(mkdir -p /c/tmp)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(r'C:/tmp/remote_llm.py'\\).read\\(\\)\\); print\\('syntax OK'\\); exec\\(open\\(r'C:/tmp/remote_llm.py'\\).read\\(\\)\\); print\\('exec OK, LLMChain:', LLMChain\\)\")",
+      "Bash(grep -E \"__pycache__|\\\\.pyc$\")",
+      "Bash(git rm *)"
     ]
   }
 }
