@@ -12,7 +12,11 @@
       "Bash(mkdir -p /c/tmp)",
       "Bash(python -c \"import ast; ast.parse\\(open\\(r'C:/tmp/remote_llm.py'\\).read\\(\\)\\); print\\('syntax OK'\\); exec\\(open\\(r'C:/tmp/remote_llm.py'\\).read\\(\\)\\); print\\('exec OK, LLMChain:', LLMChain\\)\")",
       "Bash(grep -E \"__pycache__|\\\\.pyc$\")",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(git reset *)",
+      "Bash(git commit *)",
+      "Bash(git ls-tree *)",
+      "Bash(git fetch *)"
     ]
   }
 }
