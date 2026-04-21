@@ -12,7 +12,9 @@ from utils.rag import (
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import answer_from_papers
-from utils.llm_providers import LLMConfig, PROVIDERS, GOOGLE, OPENAI, ANTHROPIC
+from utils.llm_providers import (
+    LLMConfig, LLMChain, PROVIDERS, GOOGLE, OPENAI, ANTHROPIC, GROQ,
+)
 
 load_dotenv()
 
@@ -32,15 +34,36 @@ for key, default in [
         st.session_state[key] = default
 
 
-def _default_gemini_key() -> str:
-    """Silently resolve the bundled Gemini key from secrets → env."""
+def _secret(name: str) -> str:
+    """Read a key from Streamlit secrets first, then env."""
     try:
-        k = st.secrets.get("GOOGLE_API_KEY", "")
-        if k:
-            return k
+        v = st.secrets.get(name, "")
+        if v:
+            return v
     except Exception:
         pass
-    return os.getenv("GOOGLE_API_KEY", "")
+    return os.getenv(name, "")
+
+
+# Priority order: bundled keys are tried in this order on quota exhaustion.
+_FALLBACK_ORDER: list[tuple[str, str]] = [
+    (GOOGLE, "GOOGLE_API_KEY"),
+    (GROQ, "GROQ_API_KEY"),
+    (OPENAI, "OPENAI_API_KEY"),
+    (ANTHROPIC, "ANTHROPIC_API_KEY"),
+]
+
+
+def _bundled_chain() -> LLMChain | None:
+    """Build a fallback chain from every bundled key that's configured."""
+    configs = [
+        LLMConfig(provider=prov, api_key=_secret(env))
+        for prov, env in _FALLBACK_ORDER
+        if _secret(env)
+    ]
+    if not configs:
+        return None
+    return LLMChain(configs=configs)
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -50,11 +73,11 @@ with st.sidebar:
     use_own_key = st.checkbox(
         "Use my own API key",
         value=False,
-        help="By default the app uses a bundled Google Gemini key. "
-             "Enable this to use your own key with ChatGPT, Claude or Gemini.",
+        help="By default the app uses bundled keys with automatic fallback. "
+             "Enable this to use your own key with any supported provider.",
     )
 
-    llm_config: LLMConfig | None = None
+    chain: LLMChain | None = None
     config_error: str | None = None
 
     if use_own_key:
@@ -72,7 +95,7 @@ with st.sidebar:
             help=f"Get a key at {meta['key_hint']}",
         )
         if user_key.strip():
-            llm_config = LLMConfig(provider=provider, api_key=user_key.strip())
+            chain = LLMChain(configs=[LLMConfig(provider=provider, api_key=user_key.strip())])
         else:
             config_error = "Enter your API key to continue."
         if not meta["has_embeddings"]:
@@ -81,14 +104,19 @@ with st.sidebar:
                 f"semantic re-ranking will be skipped for this provider."
             )
     else:
-        default_key = _default_gemini_key()
-        if default_key:
-            llm_config = LLMConfig(provider=GOOGLE, api_key=default_key)
-        else:
+        chain = _bundled_chain()
+        if chain is None:
             config_error = (
                 "No bundled API key is configured. Enable *Use my own API key* "
                 "in the sidebar to continue."
             )
+        elif len(chain.configs) > 1:
+            st.caption(
+                "🔁 Auto-fallback active: "
+                + " → ".join(c.provider for c in chain.configs)
+            )
+        else:
+            st.caption(f"Using bundled **{chain.primary.provider}** key.")
 
     st.divider()
 
@@ -111,7 +139,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Scientific GPT · Gemini · ChatGPT · Claude · FAISS\n"
+        "Scientific GPT · Gemini · ChatGPT · Claude · Groq · FAISS\n"
         "Semantic Scholar · OpenAlex · arXiv · PubMed · Crossref · CORE"
     )
 
@@ -119,9 +147,19 @@ with st.sidebar:
 st.title("🔬 Scientific GPT")
 st.markdown("*AI-powered academic research assistant — 6 sources, one search*")
 
-if llm_config is None:
+if chain is None:
     st.warning(config_error or "API key not configured.")
     st.stop()
+
+
+def _notify_fallback():
+    """Emit a one-line info banner if the chain just fell back to a backup."""
+    if chain.fell_back and chain.last_used is not None:
+        st.info(
+            f"ℹ️ Primary provider hit quota — automatically switched to "
+            f"**{chain.last_used.provider}**."
+        )
+
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_rag, tab_search, tab_doi = st.tabs(["📄 PDF / RAG", "🔍 Multi-Source Search", "🔗 DOI Lookup"])
@@ -136,10 +174,10 @@ with tab_rag:
         f"inline **[N]** citations and a **{citation_style}** reference list."
     )
 
-    if not llm_config.has_embeddings:
+    if not chain.has_embeddings:
         st.error(
-            f"**{llm_config.provider}** does not provide an embeddings endpoint. "
-            f"Switch to Google Gemini or OpenAI in the sidebar to use PDF indexing."
+            "None of the active providers offers embeddings. "
+            "Switch to Google Gemini or OpenAI in the sidebar to use PDF indexing."
         )
     else:
         uploaded_files = st.file_uploader(
@@ -161,7 +199,7 @@ with tab_rag:
                         st.error("No text could be extracted.")
                     else:
                         try:
-                            vs = build_vectorstore(full_text, llm_config)
+                            vs = build_vectorstore(full_text, chain)
                             st.session_state.vectorstore = vs
                             st.session_state.indexed_files = names
                             st.success(f"Index built from: {', '.join(f'**{n}**' for n in names)}")
@@ -185,7 +223,7 @@ with tab_rag:
 
         if run_rag:
             try:
-                vs = st.session_state.vectorstore or load_vectorstore(llm_config)
+                vs = st.session_state.vectorstore or load_vectorstore(chain)
             except EmbeddingsUnavailableError as e:
                 st.error(str(e))
                 vs = None
@@ -196,10 +234,19 @@ with tab_rag:
             else:
                 if st.session_state.vectorstore is None:
                     st.session_state.vectorstore = vs
-                with st.spinner(f"Querying {llm_config.provider}…"):
-                    answer = query_rag(rag_question, vs, llm_config, citation_style)
-                st.markdown("### Answer")
-                st.markdown(answer)
+                with st.spinner(f"Querying {chain.primary.provider}…"):
+                    try:
+                        answer = query_rag(rag_question, vs, chain, citation_style)
+                    except Exception as e:
+                        import traceback
+                        st.error(f"**Query failed:** {type(e).__name__}: {e}")
+                        with st.expander("Full traceback"):
+                            st.code(traceback.format_exc())
+                        answer = None
+                if answer:
+                    _notify_fallback()
+                    st.markdown("### Answer")
+                    st.markdown(answer)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Multi-Source Search + AI Answer
@@ -211,7 +258,7 @@ with tab_search:
         "Research question",
         placeholder="e.g. What are the advantages of transformer architectures over RNNs?",
         height=90,
-        help=f"{llm_config.provider} will write a cited academic answer based on the found papers.",
+        help=f"{chain.primary.provider} will write a cited academic answer based on the found papers.",
     )
 
     col_q, col_n = st.columns([4, 1])
@@ -249,13 +296,13 @@ with tab_search:
 
             if papers and research_question.strip():
                 rerank_note = (
-                    "Re-ranking" if llm_config.has_embeddings
+                    "Re-ranking" if chain.has_embeddings
                     else "Preparing (no embeddings available for re-ranking)"
                 )
                 with st.spinner(f"{rerank_note} {len(papers)} papers & generating answer…"):
                     try:
                         body, ranked = answer_from_papers(
-                            research_question, papers, llm_config, citation_style
+                            research_question, papers, chain, citation_style
                         )
                         st.session_state.answer_text = body
                         st.session_state.answer_papers = ranked
@@ -275,11 +322,12 @@ with tab_search:
     if st.session_state.get("answer_text"):
         answer_papers = st.session_state.answer_papers
         st.divider()
+        _notify_fallback()
         st.markdown("## 🧠 Answer")
         if answer_papers and papers:
             rank_hint = (
                 "semantic re-ranking via embeddings"
-                if llm_config.has_embeddings
+                if chain.has_embeddings
                 else "source order (no embeddings available for this provider)"
             )
             st.caption(

@@ -7,7 +7,7 @@ most relevant ones before feeding them to the answer-generation LLM.
 from __future__ import annotations
 import numpy as np
 from .sources.base import Paper
-from .llm_providers import LLMConfig, get_embeddings
+from .llm_providers import LLMChain
 
 _RELEVANCE_FLOOR = 0.55
 _MIN_ABSTRACT_LEN = 120
@@ -24,33 +24,28 @@ def filter_substantive(papers: list[Paper]) -> list[Paper]:
 def rerank(
     question: str,
     papers: list[Paper],
-    config: LLMConfig,
+    chain: LLMChain,
     top_k: int = 8,
     apply_floor: bool = True,
 ) -> tuple[list[Paper], list[float]]:
     """Return (top_k papers, relevance scores) sorted by cosine similarity.
 
-    If the provider has no embeddings (e.g. Anthropic), returns the first
-    top_k papers unchanged with zero scores — the answer LLM will still get
-    the full filtered list, just without semantic reordering.
+    If no provider in the chain supports embeddings, returns the first top_k
+    papers unchanged with zero scores — the answer LLM will still get the
+    full filtered list, just without semantic reordering.
     """
     if not papers:
         return [], []
     if len(papers) == 1:
         return papers, [1.0]
 
-    emb = get_embeddings(config)
-    if emb is None:
-        # Provider has no embeddings — skip semantic rerank, preserve source order.
+    if not chain.has_embeddings:
         return papers[:top_k], [0.0] * min(top_k, len(papers))
 
-    q_vec = np.asarray(emb.embed_query(question), dtype=np.float32)
-
-    paper_texts = [
-        f"{p.title}. {p.abstract or ''}".strip()
-        for p in papers
-    ]
-    p_vecs = np.asarray(emb.embed_documents(paper_texts), dtype=np.float32)
+    paper_texts = [f"{p.title}. {p.abstract or ''}".strip() for p in papers]
+    q_vec, p_vecs_list, _ = chain.embed(question, paper_texts)
+    q_vec = np.asarray(q_vec, dtype=np.float32)
+    p_vecs = np.asarray(p_vecs_list, dtype=np.float32)
 
     q_norm = q_vec / (np.linalg.norm(q_vec) + 1e-12)
     p_norms = p_vecs / (np.linalg.norm(p_vecs, axis=1, keepdims=True) + 1e-12)

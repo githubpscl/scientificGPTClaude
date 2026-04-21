@@ -2,7 +2,7 @@
 from __future__ import annotations
 from .sources.base import Paper
 from .reranker import filter_substantive, rerank
-from .llm_providers import LLMConfig, get_chat_llm
+from .llm_providers import LLMChain
 
 _PROMPT = """\
 You are a rigorous scientific research assistant. Answer the question using ONLY \
@@ -33,7 +33,7 @@ Academic answer (inline [N] citations only, no reference list at the end):"""
 def answer_from_papers(
     question: str,
     papers: list[Paper],
-    config: LLMConfig,
+    chain: LLMChain,
     citation_style: str = "APA",
     max_papers: int = 8,
 ) -> tuple[str, list[Paper]]:
@@ -45,10 +45,10 @@ def answer_from_papers(
     substantive = filter_substantive(papers)
 
     if substantive:
-        ranked, scores = rerank(question, substantive, config, top_k=max_papers)
+        ranked, scores = rerank(question, substantive, chain, top_k=max_papers)
         if not ranked:
             ranked, scores = rerank(
-                question, substantive, config, top_k=max_papers, apply_floor=False
+                question, substantive, chain, top_k=max_papers, apply_floor=False
             )
     else:
         ranked = papers[:max_papers]
@@ -75,5 +75,5 @@ def answer_from_papers(
         question=question,
     )
 
-    llm = get_chat_llm(config, temperature=0.1)
-    return llm.invoke(prompt).content, ranked
+    answer = chain.invoke_chat(prompt, temperature=0.1)
+    return answer, ranked

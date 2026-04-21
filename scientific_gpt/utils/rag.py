@@ -2,13 +2,13 @@ import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 
-from .llm_providers import LLMConfig, get_chat_llm, get_embeddings
+from .llm_providers import LLMChain, get_embeddings
 
 VECTORSTORE_PATH = "vectorstore/faiss_index"
 
 
 class EmbeddingsUnavailableError(RuntimeError):
-    """Raised when the selected provider has no embeddings endpoint."""
+    """Raised when no provider in the chain offers embeddings."""
 
 
 _SYSTEM = """You are a rigorous scientific research assistant. Follow these rules strictly:
@@ -29,21 +29,21 @@ Question: {question}
 Answer (with inline [N] citations and a ## References section at the end):"""
 
 
-def _require_embeddings(config: LLMConfig):
-    emb = get_embeddings(config)
-    if emb is None:
+def _pick_embeddings(chain: LLMChain):
+    cfg = chain.embeddings_config()
+    if cfg is None:
         raise EmbeddingsUnavailableError(
-            f"The provider '{config.provider}' does not offer embeddings. "
-            f"PDF indexing requires an embedding model — please switch to "
-            f"Google Gemini or OpenAI for this feature."
+            f"None of the configured providers ({', '.join(c.provider for c in chain.configs)}) "
+            f"offers an embeddings endpoint. PDF indexing requires embeddings — "
+            f"switch to Google Gemini or OpenAI."
         )
-    return emb
+    return get_embeddings(cfg)
 
 
-def build_vectorstore(text: str, config: LLMConfig) -> FAISS:
+def build_vectorstore(text: str, chain: LLMChain) -> FAISS:
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = splitter.split_text(text)
-    embeddings = _require_embeddings(config)
+    embeddings = _pick_embeddings(chain)
     # Batch — Gemini rejects >100 texts per call; OpenAI is higher but 90 is safe for both.
     BATCH = 90
     if len(chunks) <= BATCH:
@@ -56,10 +56,10 @@ def build_vectorstore(text: str, config: LLMConfig) -> FAISS:
     return vs
 
 
-def load_vectorstore(config: LLMConfig) -> FAISS | None:
+def load_vectorstore(chain: LLMChain) -> FAISS | None:
     if not os.path.exists(VECTORSTORE_PATH):
         return None
-    embeddings = _require_embeddings(config)
+    embeddings = _pick_embeddings(chain)
     return FAISS.load_local(
         VECTORSTORE_PATH, embeddings, allow_dangerous_deserialization=True
     )
@@ -68,7 +68,7 @@ def load_vectorstore(config: LLMConfig) -> FAISS | None:
 def query_rag(
     question: str,
     vectorstore: FAISS,
-    config: LLMConfig,
+    chain: LLMChain,
     citation_style: str = "APA",
     source_labels: list[str] | None = None,
 ) -> str:
@@ -88,6 +88,4 @@ def query_rag(
         question=question,
     )
 
-    llm = get_chat_llm(config, temperature=0.1)
-    response = llm.invoke(prompt)
-    return response.content
+    return chain.invoke_chat(prompt, temperature=0.1)
