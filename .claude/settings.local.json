@@ -16,7 +16,11 @@
       "Bash(git reset *)",
       "Bash(git commit *)",
       "Bash(git ls-tree *)",
-      "Bash(git fetch *)"
+      "Bash(git fetch *)",
+      "Bash(xxd)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, r'C:/tmp'\\); import test_llm; print\\('has LLMChain:', hasattr\\(test_llm, 'LLMChain'\\)\\); print\\('all public:', [n for n in dir\\(test_llm\\) if not n.startswith\\('_'\\)]\\)\")",
+      "Bash(python -m py_compile app.py utils/llm_backend.py utils/rag.py utils/answer_engine.py utils/reranker.py)",
+      "Bash(git push *)"
     ]
   }
 }

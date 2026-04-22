@@ -1,7 +1,7 @@
 """CORE API — world's largest open-access aggregator with full-text links.
 
 Requires a free API key from https://core.ac.uk/services/api
-Set CORE_API_KEY in your .env file.
+Set CORE_API_KEY in Streamlit secrets or your .env file.
 """
 import os
 import requests
@@ -11,12 +11,25 @@ _BASE = "https://api.core.ac.uk/v3"
 SOURCE = "CORE"
 
 
+def _read_core_key() -> str:
+    """Read CORE_API_KEY from Streamlit secrets first, then env."""
+    try:
+        import streamlit as st
+
+        v = st.secrets.get("CORE_API_KEY", "")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    except Exception:
+        pass
+    return os.getenv("CORE_API_KEY", "").strip()
+
+
 def is_available() -> bool:
-    return bool(os.getenv("CORE_API_KEY", "").strip())
+    return bool(_read_core_key())
 
 
 def search(query: str, limit: int = 5) -> list[Paper]:
-    api_key = os.getenv("CORE_API_KEY", "").strip()
+    api_key = _read_core_key()
     if not api_key:
         return []
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
