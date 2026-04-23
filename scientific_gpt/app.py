@@ -10,6 +10,7 @@ from utils.rag import (
     EmbeddingsUnavailableError,
 )
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
+from utils.sources.base import CITATION_STYLES
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import answer_from_papers, answer_from_mixed
 from utils.llm_backend import (
@@ -124,7 +125,16 @@ with st.sidebar:
 
     st.divider()
 
-    citation_style = st.radio("Citation Style", ["APA", "MLA", "IEEE"], index=0)
+    citation_style = st.selectbox(
+        "Citation Style",
+        options=CITATION_STYLES,
+        index=0,
+        help=(
+            "APA — Social Sciences · MLA — Humanities · IEEE — Engineering/CS · "
+            "Chicago — History · Harvard — Business · Vancouver — Medicine · "
+            "ACM — Computer Science"
+        ),
+    )
 
     st.divider()
     st.markdown("**Active PDF Index**")

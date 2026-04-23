@@ -1,6 +1,17 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 
+# Supported citation styles — kept as a constant so the UI can import it.
+CITATION_STYLES: list[str] = [
+    "APA",        # Psychology, Social Sciences
+    "MLA",        # Humanities
+    "IEEE",       # Engineering, CS
+    "Chicago",    # Humanities, History (author-date variant)
+    "Harvard",    # Business, UK Social Sciences
+    "Vancouver",  # Medicine, Life Sciences
+    "ACM",        # Computer Science
+]
+
 
 @dataclass
 class Paper:
@@ -35,48 +46,154 @@ class Paper:
 
         if style == "MLA":
             first = _mla_first(a)
-            rest = ", et al." if len(a) > 1 else ""
+            rest = ", et al." if len(a) > 1 else "."
             venue_part = f" *{v}*," if v else ""
-            return f'{first}{rest}. "{t}."{venue_part} {y}. {u}'.strip()
+            return f'{first}{rest} "{t}."{venue_part} {y}. {u}'.strip()
 
         if style == "IEEE":
             auth = _ieee_authors(a)
             venue_part = f", in *{v}*" if v else ""
             return f'{auth}, "{t}"{venue_part}, {y}. [Online]. Available: {u}'.strip()
 
+        if style == "Chicago":
+            auth = _chicago_authors(a)
+            venue_part = f" *{v}*." if v else ""
+            return f'{auth} {y}. "{t}."{venue_part} {u}'.strip()
+
+        if style == "Harvard":
+            auth = _harvard_authors(a)
+            venue_part = f", *{v}*" if v else ""
+            url_part = f". Available at: {u}" if u else ""
+            return f"{auth} ({y}) '{t}'{venue_part}{url_part}.".strip()
+
+        if style == "Vancouver":
+            auth = _vancouver_authors(a)
+            venue_part = f" {v}." if v else ""
+            url_part = f" Available from: {u}" if u else ""
+            return f"{auth}. {t}.{venue_part} {y}.{url_part}".strip()
+
+        if style == "ACM":
+            auth = _acm_authors(a)
+            venue_part = f" *{v}*" if v else ""
+            return f"{auth}. {y}. {t}.{venue_part} ({y}). {u}".strip()
+
         return f"{t} ({y})"
 
 
 # ── Citation helpers ──────────────────────────────────────────────────────────
 
+def _split_name(n: str) -> tuple[list[str], str]:
+    """Return (given_parts, surname). Accepts 'Jane Doe' or 'Doe, Jane'."""
+    n = n.strip()
+    if "," in n:
+        surname, given = [p.strip() for p in n.split(",", 1)]
+        return (given.split() if given else []), surname
+    parts = n.split()
+    if len(parts) < 2:
+        return [], n
+    return parts[:-1], parts[-1]
+
+
+def _initials(given: list[str], *, dotted: bool = True, spaced: bool = True) -> str:
+    if not given:
+        return ""
+    letters = [p[0].upper() for p in given if p]
+    if dotted:
+        return (". " if spaced else ".").join(letters) + "."
+    return "".join(letters)
+
+
 def _apa_authors(names: list[str]) -> str:
+    """APA 7: up to 20 authors; for more, list first 19 then '…' then last."""
+    if not names:
+        return "Unknown"
     fmt = []
-    for n in names[:7]:
-        parts = n.split()
-        if len(parts) >= 2:
-            ini = ". ".join(p[0].upper() for p in parts[:-1]) + "."
-            fmt.append(f"{parts[-1]}, {ini}")
-        else:
-            fmt.append(n)
-    if len(names) > 7:
-        fmt = fmt[:6] + [f"… {fmt[-1]}"]
-    return ", ".join(fmt) or "Unknown"
+    for n in names[:20]:
+        given, surname = _split_name(n)
+        fmt.append(f"{surname}, {_initials(given)}" if given else surname)
+    if len(names) > 20:
+        last_given, last_surname = _split_name(names[-1])
+        last = f"{last_surname}, {_initials(last_given)}" if last_given else last_surname
+        fmt = fmt[:19] + [f"… {last}"]
+    if len(fmt) == 1:
+        return fmt[0]
+    return ", ".join(fmt[:-1]) + f", & {fmt[-1]}"
 
 
 def _mla_first(names: list[str]) -> str:
     if not names:
         return "Unknown"
-    parts = names[0].split()
-    return f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) >= 2 else names[0]
+    given, surname = _split_name(names[0])
+    return f"{surname}, {' '.join(given)}" if given else surname
 
 
 def _ieee_authors(names: list[str]) -> str:
     result = []
     for n in names[:3]:
-        parts = n.split()
-        if len(parts) >= 2:
-            ini = ". ".join(p[0].upper() for p in parts[:-1])
-            result.append(f"{ini}. {parts[-1]}")
+        given, surname = _split_name(n)
+        if given:
+            result.append(f"{_initials(given)} {surname}")
         else:
-            result.append(n)
+            result.append(surname)
     return ", ".join(result) + (" et al." if len(names) > 3 else "")
+
+
+def _chicago_authors(names: list[str]) -> str:
+    """Author-date: 'Smith, John, Jane Doe, and Bob Lee.'"""
+    if not names:
+        return "Unknown."
+    formatted = []
+    for i, n in enumerate(names[:10]):
+        given, surname = _split_name(n)
+        full_given = " ".join(given)
+        if i == 0:
+            formatted.append(f"{surname}, {full_given}".strip(", "))
+        else:
+            formatted.append(f"{full_given} {surname}".strip())
+    if len(names) > 10:
+        return ", ".join(formatted) + ", et al."
+    if len(formatted) == 1:
+        return f"{formatted[0]}."
+    return ", ".join(formatted[:-1]) + f", and {formatted[-1]}."
+
+
+def _harvard_authors(names: list[str]) -> str:
+    """'Smith, J., Doe, J. and Lee, B.' (Harvard style, up to 3 authors; else 'et al.')."""
+    if not names:
+        return "Unknown"
+    parts = []
+    for n in names[:3]:
+        given, surname = _split_name(n)
+        parts.append(f"{surname}, {_initials(given, dotted=True, spaced=False)}".rstrip(", "))
+    if len(names) > 3:
+        return f"{parts[0]} et al."
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+
+def _vancouver_authors(names: list[str]) -> str:
+    """'Smith J, Doe J, Lee B' — surname + initials without dots, up to 6 authors."""
+    parts = []
+    for n in names[:6]:
+        given, surname = _split_name(n)
+        init = _initials(given, dotted=False, spaced=False)
+        parts.append(f"{surname} {init}".strip())
+    if len(names) > 6:
+        parts.append("et al")
+    return ", ".join(parts) or "Unknown"
+
+
+def _acm_authors(names: list[str]) -> str:
+    """'John Smith, Jane Doe, and Bob Lee' (full names, Oxford comma)."""
+    if not names:
+        return "Unknown"
+    display = []
+    for n in names[:10]:
+        given, surname = _split_name(n)
+        display.append(f"{' '.join(given)} {surname}".strip())
+    if len(names) > 10:
+        return ", ".join(display) + ", et al."
+    if len(display) == 1:
+        return display[0]
+    return ", ".join(display[:-1]) + f", and {display[-1]}"
