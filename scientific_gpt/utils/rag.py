@@ -40,18 +40,32 @@ def _pick_embeddings(chain: LLMChain):
     return get_embeddings(cfg)
 
 
-def build_vectorstore(text: str, chain: LLMChain) -> FAISS:
+def build_vectorstore(docs: list[tuple[str, str]], chain: LLMChain) -> FAISS:
+    """Build/replace the FAISS index from a list of (filename, text) pairs.
+
+    Each chunk keeps its source filename in metadata so PDF references can
+    be rendered correctly in combined-mode answers.
+    """
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-    chunks = splitter.split_text(text)
+    all_texts: list[str] = []
+    all_meta: list[dict] = []
+    for filename, text in docs:
+        chunks = splitter.split_text(text)
+        all_texts.extend(chunks)
+        all_meta.extend({"source": filename} for _ in chunks)
+
     embeddings = _pick_embeddings(chain)
-    # Batch — Gemini rejects >100 texts per call; OpenAI is higher but 90 is safe for both.
+    # Batch — Gemini rejects >100 texts per call; 90 is safe across providers.
     BATCH = 90
-    if len(chunks) <= BATCH:
-        vs = FAISS.from_texts(chunks, embeddings)
-    else:
-        vs = FAISS.from_texts(chunks[:BATCH], embeddings)
-        for i in range(BATCH, len(chunks), BATCH):
-            vs.add_texts(chunks[i:i + BATCH])
+    vs: FAISS | None = None
+    for i in range(0, len(all_texts), BATCH):
+        batch_texts = all_texts[i:i + BATCH]
+        batch_meta = all_meta[i:i + BATCH]
+        if vs is None:
+            vs = FAISS.from_texts(batch_texts, embeddings, metadatas=batch_meta)
+        else:
+            vs.add_texts(batch_texts, metadatas=batch_meta)
+    assert vs is not None
     vs.save_local(VECTORSTORE_PATH)
     return vs
 
@@ -63,6 +77,11 @@ def load_vectorstore(chain: LLMChain) -> FAISS | None:
     return FAISS.load_local(
         VECTORSTORE_PATH, embeddings, allow_dangerous_deserialization=True
     )
+
+
+def retrieve_chunks(vectorstore: FAISS, question: str, k: int = 4):
+    """Return the top-k PDF chunks relevant to the question."""
+    return vectorstore.similarity_search(question, k=k)
 
 
 def query_rag(
@@ -77,7 +96,7 @@ def query_rag(
     context_parts = []
     for i, doc in enumerate(docs, 1):
         label = (source_labels[i - 1] if source_labels and i - 1 < len(source_labels)
-                 else f"Source {i}")
+                 else doc.metadata.get("source", f"Source {i}"))
         context_parts.append(f"[{i}] ({label})\n{doc.page_content.strip()}")
 
     context = "\n\n".join(context_parts)
