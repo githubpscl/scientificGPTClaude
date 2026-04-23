@@ -8,7 +8,7 @@ SOURCE = "OpenAlex"
 # host_venue was removed in OpenAlex v2 — venue now lives in primary_location.source
 _SELECT = (
     "title,authorships,publication_year,abstract_inverted_index,"
-    "doi,primary_location,cited_by_count,open_access,best_oa_location"
+    "doi,primary_location,cited_by_count,open_access,best_oa_location,language"
 )
 
 
@@ -53,6 +53,7 @@ def _parse(w: dict) -> Paper:
         pdf_url=pdf_url,
         venue=venue or None,
         citation_count=w.get("cited_by_count"),
+        language=(w.get("language") or None),
     )
 
 

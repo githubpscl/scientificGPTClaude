@@ -10,7 +10,7 @@ from utils.rag import (
     EmbeddingsUnavailableError,
 )
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
-from utils.sources.base import CITATION_STYLES
+from utils.sources.base import CITATION_STYLES, LANGUAGES
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import answer_from_papers, answer_from_mixed
 from utils.claim_support import find_evidence, Evidence
@@ -143,6 +143,47 @@ with st.sidebar:
             "ACM — Computer Science"
         ),
     )
+
+    st.divider()
+    with st.expander("🔎 Search Settings", expanded=False):
+        st.markdown("**Enabled online sources**")
+        _all_srcs = available_sources()
+        enabled_sources: list[str] = []
+        for name in _all_srcs:
+            avail = is_source_available(name)
+            label = name if avail else f"{name} *(key needed)*"
+            if st.checkbox(
+                label,
+                value=avail,
+                disabled=not avail,
+                key=f"settings_src_{name}",
+            ) and avail:
+                enabled_sources.append(name)
+
+        st.markdown("**Filters**")
+        min_year_input = st.number_input(
+            "Minimum publication year",
+            min_value=0,
+            max_value=2100,
+            value=0,
+            step=1,
+            help="0 = no filter. Papers with unknown year are dropped when a "
+                 "minimum is set.",
+        )
+        min_year: int | None = int(min_year_input) if min_year_input else None
+
+        lang_labels = [label for label, _ in LANGUAGES]
+        lang_choice = st.selectbox(
+            "Language",
+            options=lang_labels,
+            index=0,
+            help="Papers without a declared language are kept — only filters out "
+                 "papers the source explicitly marks as a different language.",
+        )
+        language_code = dict(LANGUAGES)[lang_choice] or None
+    st.session_state["enabled_sources"] = enabled_sources
+    st.session_state["min_year"] = min_year
+    st.session_state["language"] = language_code
 
     st.divider()
     st.markdown("**Active PDF Index**")
@@ -315,13 +356,17 @@ with tab_ask:
             limit = st.number_input("Per source", min_value=1, max_value=15, value=5)
 
         st.markdown("**Sources**")
-        all_srcs = available_sources()
-        src_cols = st.columns(len(all_srcs))
-        for col, name in zip(src_cols, all_srcs):
-            avail = is_source_available(name)
-            label = name if avail else f"{name} *(key needed)*"
-            if col.checkbox(label, value=avail, disabled=not avail, key=f"src_{name}") and avail:
-                selected_sources.append(name)
+        all_srcs = st.session_state.get("enabled_sources") or []
+        if not all_srcs:
+            st.info(
+                "No online sources are enabled. Open **🔎 Search Settings** in "
+                "the sidebar to enable at least one."
+            )
+        else:
+            src_cols = st.columns(len(all_srcs))
+            for col, name in zip(src_cols, all_srcs):
+                if col.checkbox(name, value=True, key=f"src_{name}"):
+                    selected_sources.append(name)
 
     # PDF-mode / Combined-mode: warn if no index
     need_pdf = mode in (MODE_PDF, MODE_MIXED)
@@ -375,7 +420,11 @@ with tab_ask:
                     with st.spinner(
                         f"Searching {len(selected_sources)} source(s) in parallel…"
                     ):
-                        papers, errors = multi_search(query, selected_sources, int(limit))
+                        papers, errors = multi_search(
+                            query, selected_sources, int(limit),
+                            min_year=st.session_state.get("min_year"),
+                            language=st.session_state.get("language"),
+                        )
                     st.session_state.search_results = papers
                     st.session_state.search_errors = errors
                     if papers:
@@ -398,7 +447,11 @@ with tab_ask:
                     with st.spinner(
                         f"Searching {len(selected_sources)} source(s) in parallel…"
                     ):
-                        papers, errors = multi_search(query, selected_sources, int(limit))
+                        papers, errors = multi_search(
+                            query, selected_sources, int(limit),
+                            min_year=st.session_state.get("min_year"),
+                            language=st.session_state.get("language"),
+                        )
                     st.session_state.search_results = papers
                     st.session_state.search_errors = errors
                     with st.spinner("Blending PDF + online sources into answer…"):
@@ -569,15 +622,17 @@ with tab_verify:
             )
 
         st.markdown("**Sources**")
-        v_srcs = available_sources()
-        v_cols = st.columns(len(v_srcs))
-        for col, name in zip(v_cols, v_srcs):
-            avail = is_source_available(name)
-            label = name if avail else f"{name} *(key needed)*"
-            if col.checkbox(
-                label, value=avail, disabled=not avail, key=f"vsrc_{name}"
-            ) and avail:
-                v_selected_sources.append(name)
+        v_srcs = st.session_state.get("enabled_sources") or []
+        if not v_srcs:
+            st.info(
+                "No online sources are enabled. Open **🔎 Search Settings** in "
+                "the sidebar to enable at least one."
+            )
+        else:
+            v_cols = st.columns(len(v_srcs))
+            for col, name in zip(v_cols, v_srcs):
+                if col.checkbox(name, value=True, key=f"vsrc_{name}"):
+                    v_selected_sources.append(name)
 
     if v_need_pdf and not st.session_state.indexed_files:
         st.warning(
@@ -622,7 +677,9 @@ with tab_verify:
                         f"Searching {len(v_selected_sources)} source(s) in parallel…"
                     ):
                         online_papers, v_errors = multi_search(
-                            v_query.strip(), v_selected_sources, int(v_limit)
+                            v_query.strip(), v_selected_sources, int(v_limit),
+                            min_year=st.session_state.get("min_year"),
+                            language=st.session_state.get("language"),
                         )
                     for src, err in v_errors.items():
                         st.warning(f"**{src}** failed: {err}")

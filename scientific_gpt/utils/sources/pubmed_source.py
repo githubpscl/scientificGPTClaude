@@ -8,6 +8,13 @@ _EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 _EMAIL = "scientificgpt@research.app"
 SOURCE = "PubMed"
 
+# PubMed uses ISO 639-2 (3-letter); map the common ones to ISO 639-1 (2-letter)
+# so filtering is consistent across sources.
+_LANG_3_TO_2 = {
+    "eng": "en", "ger": "de", "fre": "fr", "spa": "es", "ita": "it",
+    "por": "pt", "dut": "nl", "rus": "ru", "chi": "zh", "jpn": "ja",
+}
+
 
 def search(query: str, limit: int = 5) -> list[Paper]:
     # Step 1: get PMIDs
@@ -89,6 +96,12 @@ def _parse_xml(xml_text: str) -> list[Paper]:
                 doi = eid.text
                 break
 
+        # Language (PubMed uses 3-letter codes; normalize to 2-letter when known)
+        lang_el = art.find("Language")
+        lang = None
+        if lang_el is not None and lang_el.text:
+            lang = _LANG_3_TO_2.get(lang_el.text.lower(), lang_el.text.lower())
+
         papers.append(Paper(
             title=title,
             authors=authors,
@@ -100,5 +113,6 @@ def _parse_xml(xml_text: str) -> list[Paper]:
             pdf_url=None,
             venue=venue,
             citation_count=None,
+            language=lang,
         ))
     return papers

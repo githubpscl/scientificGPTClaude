@@ -12,6 +12,21 @@ CITATION_STYLES: list[str] = [
     "ACM",        # Computer Science
 ]
 
+# Language filter options: (display_name, iso_code). Empty code = no filter.
+LANGUAGES: list[tuple[str, str]] = [
+    ("Any", ""),
+    ("English", "en"),
+    ("German", "de"),
+    ("French", "fr"),
+    ("Spanish", "es"),
+    ("Italian", "it"),
+    ("Portuguese", "pt"),
+    ("Dutch", "nl"),
+    ("Russian", "ru"),
+    ("Chinese", "zh"),
+    ("Japanese", "ja"),
+]
+
 
 @dataclass
 class Paper:
@@ -26,6 +41,7 @@ class Paper:
     venue: str | None = None
     citation_count: int | None = None
     tldr: str | None = None         # AI-generated 1-sentence summary (SS only)
+    language: str | None = None     # ISO 639-1 code ("en", "de", …) when source provides it
 
     def dedup_key(self) -> str:
         if self.doi:

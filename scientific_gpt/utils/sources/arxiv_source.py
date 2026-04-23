@@ -25,4 +25,5 @@ def _parse(r: arxiv.Result) -> Paper:
         pdf_url=r.pdf_url,
         venue="arXiv",
         citation_count=None,
+        language="en",
     )

@@ -51,13 +51,23 @@ def search(
     query: str,
     sources: list[str],
     limit_per_source: int = 5,
+    min_year: int | None = None,
+    language: str | None = None,
 ) -> tuple[list[Paper], dict[str, str]]:
     """Run parallel search across selected sources.
+
+    Filters:
+        min_year:  drop papers older than this year (strict — unknown year is dropped).
+        language:  ISO 639-1 code; drop papers whose language is known and differs
+                   (permissive — papers with unknown language are kept).
 
     Returns:
         papers: deduplicated list ordered by source then relevance.
         errors: {source_name: error_message} for any failed source.
     """
+    if not sources:
+        return [], {}
+
     results: list[Paper] = []
     errors: dict[str, str] = {}
 
@@ -85,7 +95,28 @@ def search(
                 else:
                     errors[name] = msg
 
-    return _deduplicate(results), errors
+    filtered = _apply_filters(results, min_year=min_year, language=language)
+    return _deduplicate(filtered), errors
+
+
+def _apply_filters(
+    papers: list[Paper],
+    *,
+    min_year: int | None,
+    language: str | None,
+) -> list[Paper]:
+    out = []
+    lang = (language or "").strip().lower() or None
+    for p in papers:
+        if min_year is not None:
+            if p.year is None or p.year < min_year:
+                continue
+        if lang is not None:
+            p_lang = (p.language or "").strip().lower()
+            if p_lang and p_lang != lang:
+                continue
+        out.append(p)
+    return out
 
 
 def _deduplicate(papers: list[Paper]) -> list[Paper]:
