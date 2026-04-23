@@ -392,7 +392,7 @@ with tab_ask:
 
     # Online-mode / Combined-mode: search configuration
     need_online = mode in (MODE_ONLINE, MODE_MIXED)
-    selected_sources: list[str] = []
+    selected_sources: list[str] = list(st.session_state.get("enabled_sources") or [])
     query = ""
     limit = 5
     if need_online:
@@ -408,18 +408,16 @@ with tab_ask:
         with col_n:
             limit = st.number_input("Per source", min_value=1, max_value=15, value=5)
 
-        st.markdown("**Sources**")
-        all_srcs = st.session_state.get("enabled_sources") or []
-        if not all_srcs:
+        if selected_sources:
+            st.caption(
+                "Sources: " + " · ".join(f"**{s}**" for s in selected_sources)
+                + "  _(configure in sidebar → 🔎 Search Settings)_"
+            )
+        else:
             st.info(
                 "No online sources are enabled. Open **🔎 Search Settings** in "
                 "the sidebar to enable at least one."
             )
-        else:
-            src_cols = st.columns(len(all_srcs))
-            for col, name in zip(src_cols, all_srcs):
-                if col.checkbox(name, value=True, key=f"src_{name}"):
-                    selected_sources.append(name)
 
     # PDF-mode / Combined-mode: warn if no index
     need_pdf = mode in (MODE_PDF, MODE_MIXED)
@@ -657,7 +655,7 @@ with tab_verify:
     v_need_online = v_scope in (SCOPE_ONLINE, SCOPE_MIXED)
     v_need_pdf = v_scope in (SCOPE_PDF, SCOPE_MIXED)
 
-    v_selected_sources: list[str] = []
+    v_selected_sources: list[str] = list(st.session_state.get("enabled_sources") or [])
     v_query = ""
     v_limit = 5
     if v_need_online:
@@ -674,18 +672,16 @@ with tab_verify:
                 "Per source", min_value=1, max_value=15, value=5, key="verify_limit"
             )
 
-        st.markdown("**Sources**")
-        v_srcs = st.session_state.get("enabled_sources") or []
-        if not v_srcs:
+        if v_selected_sources:
+            st.caption(
+                "Sources: " + " · ".join(f"**{s}**" for s in v_selected_sources)
+                + "  _(configure in sidebar → 🔎 Search Settings)_"
+            )
+        else:
             st.info(
                 "No online sources are enabled. Open **🔎 Search Settings** in "
                 "the sidebar to enable at least one."
             )
-        else:
-            v_cols = st.columns(len(v_srcs))
-            for col, name in zip(v_cols, v_srcs):
-                if col.checkbox(name, value=True, key=f"vsrc_{name}"):
-                    v_selected_sources.append(name)
 
     if v_need_pdf and not st.session_state.indexed_files:
         st.warning(
