@@ -13,6 +13,7 @@ from utils.search_engine import search as multi_search, available_sources, is_so
 from utils.sources.base import CITATION_STYLES
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import answer_from_papers, answer_from_mixed
+from utils.claim_support import find_evidence, Evidence
 from utils.llm_backend import (
     LLMConfig, LLMChain, PROVIDERS, GOOGLE, OPENAI, ANTHROPIC, GROQ,
 )
@@ -27,6 +28,11 @@ MODE_PDF = "📄 Only PDFs (RAG)"
 MODE_ONLINE = "🌐 Only online sources"
 MODE_MIXED = "🔗 Combined (PDFs + online)"
 
+# Scope options for claim verification
+SCOPE_PDF = "📄 PDFs only"
+SCOPE_ONLINE = "🌐 Online sources only"
+SCOPE_MIXED = "🔗 Combined"
+
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, default in [
     ("search_results", []),
@@ -37,6 +43,8 @@ for key, default in [
     ("answer_pdf_refs", []),
     ("vectorstore", None),
     ("indexed_files", []),
+    ("verify_evidence", []),
+    ("verify_claim_shown", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -207,7 +215,9 @@ def _render_pdf_reference(ref):
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_pdfs, tab_ask, tab_doi = st.tabs(["📄 PDFs", "🔬 Ask", "🔗 DOI Lookup"])
+tab_pdfs, tab_ask, tab_verify, tab_doi = st.tabs(
+    ["📄 PDFs", "🔬 Ask", "✅ Verify Claim", "🔗 DOI Lookup"]
+)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 1 — PDF Management
@@ -508,7 +518,221 @@ with tab_ask:
                 st.markdown("---")
 
 # ════════════════════════════════════════════════════════════════════════════════
-# TAB 3 — DOI Lookup (Crossref)
+# TAB 3 — Verify Claim (evidence search)
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_verify:
+    st.header("Find evidence for a claim")
+    st.caption(
+        "Paste a specific statement and we'll search your PDFs and/or online "
+        "databases for sources that **support**, **contradict**, or are "
+        "**unrelated** to it."
+    )
+
+    claim_text = st.text_area(
+        "Claim",
+        placeholder="e.g. Attention mechanisms outperform recurrence on long-range "
+                    "dependencies in language modeling.",
+        height=90,
+        key="claim_text",
+    )
+
+    v_scope = st.radio(
+        "Sources to check",
+        options=[SCOPE_PDF, SCOPE_ONLINE, SCOPE_MIXED],
+        index=1,
+        horizontal=True,
+        help=(
+            "• **PDFs only** — search your uploaded papers.\n"
+            "• **Online only** — search multi-database academic sources.\n"
+            "• **Combined** — both."
+        ),
+    )
+
+    v_need_online = v_scope in (SCOPE_ONLINE, SCOPE_MIXED)
+    v_need_pdf = v_scope in (SCOPE_PDF, SCOPE_MIXED)
+
+    v_selected_sources: list[str] = []
+    v_query = ""
+    v_limit = 5
+    if v_need_online:
+        col_q, col_n = st.columns([4, 1])
+        with col_q:
+            v_query = st.text_input(
+                "Search keywords",
+                placeholder="keywords for the online database search",
+                help="Usually the core terms of your claim.",
+                key="verify_query",
+            )
+        with col_n:
+            v_limit = st.number_input(
+                "Per source", min_value=1, max_value=15, value=5, key="verify_limit"
+            )
+
+        st.markdown("**Sources**")
+        v_srcs = available_sources()
+        v_cols = st.columns(len(v_srcs))
+        for col, name in zip(v_cols, v_srcs):
+            avail = is_source_available(name)
+            label = name if avail else f"{name} *(key needed)*"
+            if col.checkbox(
+                label, value=avail, disabled=not avail, key=f"vsrc_{name}"
+            ) and avail:
+                v_selected_sources.append(name)
+
+    if v_need_pdf and not st.session_state.indexed_files:
+        st.warning(
+            "No PDF index available. Go to the **PDFs** tab and build an index first."
+        )
+
+    if st.button("🔍 Find Evidence", type="primary", key="verify_btn"):
+        if not claim_text.strip():
+            st.warning("Please enter a claim.")
+        elif v_need_online and not v_query.strip():
+            st.warning("Please enter search keywords.")
+        elif v_need_online and not v_selected_sources:
+            st.warning("Please select at least one online source.")
+        elif v_need_pdf and not st.session_state.indexed_files:
+            st.warning("Please build a PDF index in the **PDFs** tab first.")
+        else:
+            st.session_state.verify_evidence = []
+            st.session_state.verify_claim_shown = claim_text.strip()
+
+            vs = None
+            if v_need_pdf:
+                try:
+                    vs = st.session_state.vectorstore or load_vectorstore(chain)
+                    if vs is not None and st.session_state.vectorstore is None:
+                        st.session_state.vectorstore = vs
+                except EmbeddingsUnavailableError as e:
+                    st.error(str(e))
+                    st.stop()
+                if vs is None:
+                    st.error("FAISS index missing — rebuild it in the **PDFs** tab.")
+                    st.stop()
+
+            pdf_chunks = []
+            online_papers = []
+            try:
+                if v_need_pdf:
+                    with st.spinner("Retrieving relevant PDF excerpts…"):
+                        pdf_chunks = retrieve_chunks(vs, claim_text.strip(), k=5)
+
+                if v_need_online:
+                    with st.spinner(
+                        f"Searching {len(v_selected_sources)} source(s) in parallel…"
+                    ):
+                        online_papers, v_errors = multi_search(
+                            v_query.strip(), v_selected_sources, int(v_limit)
+                        )
+                    for src, err in v_errors.items():
+                        st.warning(f"**{src}** failed: {err}")
+
+                if not pdf_chunks and not online_papers:
+                    st.info("No candidate sources were found to judge.")
+                else:
+                    with st.spinner("Judging each source against the claim…"):
+                        evidence = find_evidence(
+                            claim_text.strip(),
+                            chain,
+                            pdf_chunks=pdf_chunks,
+                            online_papers=online_papers,
+                        )
+                    st.session_state.verify_evidence = evidence
+
+            except Exception as e:
+                import traceback
+                st.error(f"**Evidence search failed:** {type(e).__name__}: {e}")
+                with st.expander("Full traceback"):
+                    st.code(traceback.format_exc())
+
+    # ── Render evidence groups ────────────────────────────────────────────────
+    evidence = st.session_state.verify_evidence
+    if evidence:
+        st.divider()
+        _notify_fallback()
+        st.markdown(f"**Claim:** _{st.session_state.verify_claim_shown}_")
+
+        supports = [e for e in evidence if e.verdict == "supports"]
+        contradicts = [e for e in evidence if e.verdict == "contradicts"]
+        unrelated = [e for e in evidence if e.verdict == "unrelated"]
+
+        summary = (
+            f"✅ **{len(supports)}** support &nbsp; · &nbsp; "
+            f"❌ **{len(contradicts)}** contradict &nbsp; · &nbsp; "
+            f"➖ **{len(unrelated)}** unrelated"
+        )
+        st.markdown(summary)
+
+        def _render_evidence(ev: Evidence):
+            if ev.kind == "paper" and ev.paper is not None:
+                citation = ev.paper.format_citation(citation_style)
+                color = SOURCE_COLORS.get(ev.paper.source, "#888")
+                badge = (
+                    f"<span style='background:{color};color:white;"
+                    f"padding:1px 6px;border-radius:3px;font-size:0.72em'>"
+                    f"{ev.paper.source}</span>"
+                )
+                link = f"[🔗 Open]({ev.paper.url})" if ev.paper.url else ""
+                st.markdown(
+                    f"**[{ev.index}]** {citation} &nbsp; {badge} &nbsp; {link}",
+                    unsafe_allow_html=True,
+                )
+            else:
+                pdf_badge = (
+                    "<span style='background:#6c757d;color:white;"
+                    "padding:1px 6px;border-radius:3px;font-size:0.72em'>PDF</span>"
+                )
+                st.markdown(
+                    f"**[{ev.index}]** {ev.filename or 'PDF'} &nbsp; {pdf_badge}",
+                    unsafe_allow_html=True,
+                )
+            if ev.reason:
+                st.markdown(f"> {ev.reason}")
+            with st.expander(f"Excerpt from [{ev.index}]"):
+                st.markdown(f"> {ev.excerpt}…")
+
+        if supports:
+            st.markdown("### ✅ Supporting sources")
+            for ev in supports:
+                _render_evidence(ev)
+        if contradicts:
+            st.markdown("### ❌ Contradicting sources")
+            for ev in contradicts:
+                _render_evidence(ev)
+        if unrelated:
+            with st.expander(f"➖ {len(unrelated)} unrelated sources"):
+                for ev in unrelated:
+                    _render_evidence(ev)
+
+        # Export
+        lines = [f"Claim: {st.session_state.verify_claim_shown}", ""]
+        for label, group in (
+            ("Supporting", supports),
+            ("Contradicting", contradicts),
+            ("Unrelated", unrelated),
+        ):
+            if not group:
+                continue
+            lines.append(f"## {label}")
+            for ev in group:
+                if ev.kind == "paper" and ev.paper is not None:
+                    lines.append(
+                        f"[{ev.index}] {ev.paper.format_citation(citation_style)}"
+                    )
+                else:
+                    lines.append(f"[{ev.index}] PDF — {ev.filename or 'PDF'}")
+                if ev.reason:
+                    lines.append(f"    Reason: {ev.reason}")
+            lines.append("")
+        st.download_button(
+            "📥 Export Evidence Report",
+            data="\n".join(lines),
+            file_name=f"claim_evidence_{citation_style}.txt",
+            mime="text/plain",
+        )
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 4 — DOI Lookup (Crossref)
 # ════════════════════════════════════════════════════════════════════════════════
 with tab_doi:
     st.header("DOI Lookup & Citation Validator")
