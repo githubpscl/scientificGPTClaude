@@ -274,13 +274,13 @@ def _keyword_input(
 
     kws: list[str] = st.session_state.setdefault(state_key, [])
     if kws:
-        cap = st.columns([10, 1])
+        cap = st.columns([8, 2])
         with cap[0]:
             st.caption(
                 f"**{len(kws)} keyword{'s' if len(kws) != 1 else ''}** — click to remove"
             )
         with cap[1]:
-            if st.button("Clear", key=f"{state_key}__clear", use_container_width=True):
+            if st.button("Clear all", key=f"{state_key}__clear"):
                 st.session_state[state_key] = []
                 st.rerun()
         cols = st.columns(min(6, len(kws)))
