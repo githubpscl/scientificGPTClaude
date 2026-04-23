@@ -45,6 +45,8 @@ for key, default in [
     ("indexed_files", []),
     ("verify_evidence", []),
     ("verify_claim_shown", None),
+    ("ask_keywords", []),
+    ("verify_keywords", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -242,6 +244,55 @@ def _render_online_reference(i: int, p, style: str):
     )
 
 
+def _keyword_input(
+    label: str,
+    state_key: str,
+    *,
+    placeholder: str,
+    help_text: str | None = None,
+) -> str:
+    """Chip-style keyword input. Enter adds a keyword, clicking a chip removes it.
+
+    Returns the space-joined keyword string sent to the search APIs.
+    """
+    input_key = f"{state_key}__input"
+
+    def _on_submit():
+        v = st.session_state.get(input_key, "").strip()
+        kws = st.session_state.setdefault(state_key, [])
+        if v and v not in kws:
+            kws.append(v)
+        st.session_state[input_key] = ""
+
+    st.text_input(
+        label,
+        key=input_key,
+        on_change=_on_submit,
+        placeholder=placeholder,
+        help=help_text,
+    )
+
+    kws: list[str] = st.session_state.setdefault(state_key, [])
+    if kws:
+        cap = st.columns([10, 1])
+        with cap[0]:
+            st.caption(
+                f"**{len(kws)} keyword{'s' if len(kws) != 1 else ''}** — click to remove"
+            )
+        with cap[1]:
+            if st.button("Clear", key=f"{state_key}__clear", use_container_width=True):
+                st.session_state[state_key] = []
+                st.rerun()
+        cols = st.columns(min(6, len(kws)))
+        for i, kw in enumerate(kws):
+            col = cols[i % len(cols)]
+            if col.button(f"✕  {kw}", key=f"{state_key}__rm_{i}",
+                          use_container_width=True):
+                kws.pop(i)
+                st.rerun()
+    return " ".join(kws).strip()
+
+
 def _render_pdf_reference(ref):
     badge = (
         "<span style='background:#6c757d;color:white;"
@@ -347,10 +398,12 @@ with tab_ask:
     if need_online:
         col_q, col_n = st.columns([4, 1])
         with col_q:
-            query = st.text_input(
+            query = _keyword_input(
                 "Search keywords",
-                placeholder="e.g. transformer attention mechanism",
-                help="Keywords sent to the databases. Can equal your question or be more specific.",
+                state_key="ask_keywords",
+                placeholder="Type a keyword and press Enter",
+                help_text="Keywords are combined (space-separated) before being sent "
+                          "to the databases. Press Enter to add each keyword.",
             )
         with col_n:
             limit = st.number_input("Per source", min_value=1, max_value=15, value=5)
@@ -610,11 +663,11 @@ with tab_verify:
     if v_need_online:
         col_q, col_n = st.columns([4, 1])
         with col_q:
-            v_query = st.text_input(
+            v_query = _keyword_input(
                 "Search keywords",
-                placeholder="keywords for the online database search",
-                help="Usually the core terms of your claim.",
-                key="verify_query",
+                state_key="verify_keywords",
+                placeholder="Type a keyword and press Enter",
+                help_text="Usually the core terms of your claim. Press Enter to add each keyword.",
             )
         with col_n:
             v_limit = st.number_input(
