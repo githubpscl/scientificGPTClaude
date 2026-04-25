@@ -42,11 +42,17 @@ class Paper:
     citation_count: int | None = None
     tldr: str | None = None         # AI-generated 1-sentence summary (SS only)
     language: str | None = None     # ISO 639-1 code ("en", "de", …) when source provides it
+    is_open_access: bool | None = None  # True/False when known, None if unspecified
+    is_retracted: bool = False      # set by Crossref when a retraction notice is linked
 
     def dedup_key(self) -> str:
         if self.doi:
             return f"doi:{self.doi.lower().strip()}"
         return f"title:{self.title.lower().strip()[:100]}"
+
+    def to_bibtex(self, key: str | None = None) -> str:
+        """Return a single @article BibTeX entry."""
+        return _to_bibtex(self, key)
 
     def format_citation(self, style: str) -> str:
         t = self.title or "Unknown Title"
@@ -94,6 +100,73 @@ class Paper:
             return f"{auth}. {y}. {t}.{venue_part} ({y}). {u}".strip()
 
         return f"{t} ({y})"
+
+
+# ── BibTeX ────────────────────────────────────────────────────────────────────
+
+def _bibtex_key(p: "Paper") -> str:
+    """First-author surname + year + first significant title word."""
+    import re as _re
+    if p.authors:
+        _, surname = _split_name(p.authors[0])
+        surname_part = _re.sub(r"\W+", "", surname).lower() or "anon"
+    else:
+        surname_part = "anon"
+    year_part = str(p.year) if p.year else "nd"
+    title_word = ""
+    if p.title:
+        for w in _re.findall(r"\w+", p.title):
+            if len(w) > 3 and w.lower() not in ("with", "from", "this", "that", "into"):
+                title_word = w.lower()
+                break
+    parts = [surname_part, year_part]
+    if title_word:
+        parts.append(title_word)
+    return "_".join(parts)
+
+
+def _bib_escape(value: str) -> str:
+    """Escape characters BibTeX treats specially when not inside braces."""
+    if not value:
+        return ""
+    return (
+        value.replace("\\", "\\\\")
+             .replace("&", r"\&")
+             .replace("%", r"\%")
+             .replace("$", r"\$")
+             .replace("#", r"\#")
+             .replace("_", r"\_")
+    )
+
+
+def _bibtex_author(name: str) -> str:
+    """BibTeX prefers 'Surname, Given' separated by ' and '."""
+    given, surname = _split_name(name)
+    if given:
+        return f"{surname}, {' '.join(given)}"
+    return surname
+
+
+def _to_bibtex(p: "Paper", key: str | None) -> str:
+    cite_key = key or _bibtex_key(p)
+    fields: list[str] = []
+    if p.title:
+        fields.append(f"  title = {{{_bib_escape(p.title)}}}")
+    if p.authors:
+        fields.append(
+            "  author = {"
+            + " and ".join(_bib_escape(_bibtex_author(a)) for a in p.authors)
+            + "}"
+        )
+    if p.year:
+        fields.append(f"  year = {{{p.year}}}")
+    if p.venue:
+        fields.append(f"  journal = {{{_bib_escape(p.venue)}}}")
+    if p.doi:
+        fields.append(f"  doi = {{{p.doi}}}")
+    if p.url:
+        fields.append(f"  url = {{{p.url}}}")
+    return f"@article{{{cite_key},\n" + ",\n".join(fields) + "\n}"
 
 
 # ── Citation helpers ──────────────────────────────────────────────────────────

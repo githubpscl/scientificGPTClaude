@@ -12,8 +12,9 @@ from utils.rag import (
 from utils.search_engine import search as multi_search, available_sources, is_source_available, SOURCE_COLORS
 from utils.sources.base import CITATION_STYLES, LANGUAGES
 from utils.sources.crossref import lookup_doi
-from utils.answer_engine import answer_from_papers, answer_from_mixed
+from utils.answer_engine import stream_from_papers, stream_from_mixed
 from utils.claim_support import find_evidence, Evidence
+from utils.secrets_filter import scrub as _scrub
 from utils.llm_backend import (
     LLMConfig, LLMChain, PROVIDERS, GOOGLE, OPENAI, ANTHROPIC, GROQ,
 )
@@ -47,6 +48,9 @@ for key, default in [
     ("verify_claim_shown", None),
     ("ask_keywords", []),
     ("verify_keywords", []),
+    ("question_history", []),     # list[str], most recent first, capped at 12
+    ("rq_widget_id", 0),           # bumps to force textarea re-render on recall
+    ("recall_question", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -183,9 +187,55 @@ with st.sidebar:
                  "papers the source explicitly marks as a different language.",
         )
         language_code = dict(LANGUAGES)[lang_choice] or None
+
+        open_access_only = st.checkbox(
+            "Open access only",
+            value=False,
+            help="Drop papers that are explicitly marked as non-OA. "
+                 "Papers with unknown access status are kept.",
+        )
+        min_cit_input = st.number_input(
+            "Minimum citation count",
+            min_value=0, max_value=100000, value=0, step=1,
+            help="0 = no filter. Papers without a citation count are kept.",
+        )
+        min_citations: int | None = int(min_cit_input) if min_cit_input else None
+        exclude_retracted = st.checkbox(
+            "Exclude retracted papers", value=True,
+            help="Drops papers flagged as retracted by Crossref."
+        )
+        sort_by = st.selectbox(
+            "Sort results",
+            options=["relevance", "year", "citations"],
+            index=0,
+            help="Order of the retrieved papers list.",
+        )
     st.session_state["enabled_sources"] = enabled_sources
     st.session_state["min_year"] = min_year
     st.session_state["language"] = language_code
+    st.session_state["open_access_only"] = open_access_only
+    st.session_state["min_citations"] = min_citations
+    st.session_state["exclude_retracted"] = exclude_retracted
+    st.session_state["sort_by"] = sort_by
+
+    cache_size = len(st.session_state.get("search_cache") or {})
+    if cache_size:
+        if st.button(f"🗑️ Clear search cache ({cache_size})", key="clear_search_cache"):
+            st.session_state["search_cache"] = {}
+            st.rerun()
+
+    st.divider()
+    if st.session_state.question_history:
+        with st.expander("🕘 Recent questions", expanded=False):
+            for i, q in enumerate(st.session_state.question_history):
+                preview = q if len(q) <= 60 else q[:57] + "…"
+                if st.button(preview, key=f"hist_{i}", use_container_width=True):
+                    st.session_state.recall_question = q
+                    st.session_state.rq_widget_id += 1
+                    st.rerun()
+            if st.button("Clear history", key="clear_hist"):
+                st.session_state.question_history = []
+                st.rerun()
 
     st.divider()
     st.markdown("**Active PDF Index**")
@@ -195,6 +245,7 @@ with st.sidebar:
         if st.button("🗑️ Clear Index"):
             st.session_state.vectorstore = None
             st.session_state.indexed_files = []
+            st.session_state.pdf_hash = None
             import shutil
             if os.path.exists("vectorstore/faiss_index"):
                 shutil.rmtree("vectorstore/faiss_index")
@@ -225,13 +276,28 @@ def _notify_fallback():
         )
 
 
-def _render_online_reference(i: int, p, style: str):
-    citation = p.format_citation(style)
+def _badges(p) -> str:
+    """Source + open-access + retraction badges as one HTML string."""
     color = SOURCE_COLORS.get(p.source, "#888")
-    badge_html = (
+    parts = [
         f"<span style='background:{color};color:white;"
         f"padding:1px 6px;border-radius:3px;font-size:0.72em'>{p.source}</span>"
-    )
+    ]
+    if p.is_open_access:
+        parts.append(
+            "<span style='background:#0f9d58;color:white;"
+            "padding:1px 6px;border-radius:3px;font-size:0.72em'>OA</span>"
+        )
+    if p.is_retracted:
+        parts.append(
+            "<span style='background:#c62828;color:white;"
+            "padding:1px 6px;border-radius:3px;font-size:0.72em'>⚠️ RETRACTED</span>"
+        )
+    return " &nbsp; ".join(parts)
+
+
+def _render_online_reference(i: int, p, style: str):
+    citation = p.format_citation(style)
     links = []
     if p.url:
         links.append(f"[🔗 Open]({p.url})")
@@ -239,8 +305,39 @@ def _render_online_reference(i: int, p, style: str):
         links.append(f"[📄 PDF]({p.pdf_url})")
     link_str = " &nbsp; ".join(links)
     st.markdown(
-        f"**[{i}]** {citation} &nbsp; {badge_html} &nbsp; {link_str}",
+        f"**[{i}]** {citation} &nbsp; {_badges(p)} &nbsp; {link_str}",
         unsafe_allow_html=True,
+    )
+
+
+def _cached_search(query: str, sources: list[str], limit: int, **filters):
+    """Per-session cache for multi_search.
+
+    Same (query, sources, limit, filter) tuple returns the previous result
+    instead of re-hitting all APIs — critical when the user iterates on the
+    research question without changing the search terms.
+    """
+    cache: dict = st.session_state.setdefault("search_cache", {})
+    key = (
+        query.strip().lower(),
+        tuple(sources),
+        int(limit),
+        tuple(sorted((k, v) for k, v in filters.items())),
+    )
+    if key not in cache:
+        cache[key] = multi_search(query, sources, limit, **filters)
+    return cache[key]
+
+
+def _filter_kwargs() -> dict:
+    """Pack all sidebar-configured search filters for multi_search."""
+    return dict(
+        min_year=st.session_state.get("min_year"),
+        language=st.session_state.get("language"),
+        open_access_only=st.session_state.get("open_access_only", False),
+        min_citations=st.session_state.get("min_citations"),
+        exclude_retracted=st.session_state.get("exclude_retracted", True),
+        sort_by=st.session_state.get("sort_by", "relevance"),
     )
 
 
@@ -332,31 +429,54 @@ with tab_pdfs:
         )
 
         if uploaded_files:
+            import hashlib
+
+            def _hash_uploads(files) -> str:
+                h = hashlib.sha256()
+                for f in sorted(files, key=lambda x: x.name):
+                    h.update(f.name.encode("utf-8"))
+                    f.seek(0)
+                    h.update(f.read())
+                    f.seek(0)
+                return h.hexdigest()
+
+            current_hash = _hash_uploads(uploaded_files)
+            if st.session_state.get("pdf_hash") == current_hash and st.session_state.vectorstore:
+                st.success(
+                    "✅ These exact files are already indexed — no need to rebuild."
+                )
+
             if st.button("📥 Build / Update FAISS Index", type="primary"):
-                with st.spinner("Extracting text and computing embeddings…"):
-                    docs: list[tuple[str, str]] = []
-                    for f in uploaded_files:
-                        t = extract_text_from_pdf(f)
-                        if t.strip():
-                            docs.append((f.name, t))
+                if st.session_state.get("pdf_hash") == current_hash and st.session_state.vectorstore:
+                    st.info("Skipped — same files as the existing index.")
+                else:
+                    with st.spinner("Extracting text and computing embeddings…"):
+                        docs: list[tuple[str, str]] = []
+                        for f in uploaded_files:
+                            t = extract_text_from_pdf(f)
+                            if t.strip():
+                                docs.append((f.name, t))
+                            else:
+                                st.warning(f"No text extracted from **{f.name}** — skipped.")
+                        if not docs:
+                            st.error("No text could be extracted.")
                         else:
-                            st.warning(f"No text extracted from **{f.name}** — skipped.")
-                    if not docs:
-                        st.error("No text could be extracted.")
-                    else:
-                        try:
-                            vs = build_vectorstore(docs, chain)
-                            st.session_state.vectorstore = vs
-                            st.session_state.indexed_files = [n for n, _ in docs]
-                            st.success(
-                                f"Index built from: "
-                                f"{', '.join(f'**{n}**' for n, _ in docs)}"
-                            )
-                        except Exception as e:
-                            import traceback
-                            st.error(f"**Embedding failed:** {type(e).__name__}: {e}")
-                            with st.expander("Full traceback"):
-                                st.code(traceback.format_exc())
+                            try:
+                                vs = build_vectorstore(docs, chain)
+                                st.session_state.vectorstore = vs
+                                st.session_state.indexed_files = [n for n, _ in docs]
+                                st.session_state.pdf_hash = current_hash
+                                st.success(
+                                    f"Index built from: "
+                                    f"{', '.join(f'**{n}**' for n, _ in docs)}"
+                                )
+                            except Exception as e:
+                                import traceback
+                                st.error(
+                                    f"**Embedding failed:** {type(e).__name__}: {_scrub(str(e))}"
+                                )
+                                with st.expander("Full traceback"):
+                                    st.code(_scrub(traceback.format_exc()))
 
     st.divider()
     st.markdown("**Current index**")
@@ -386,9 +506,14 @@ with tab_ask:
 
     research_question = st.text_area(
         "Research question",
+        value=st.session_state.recall_question,
         placeholder="e.g. What are the advantages of transformer architectures over RNNs?",
         height=100,
+        key=f"rq_input_{st.session_state.rq_widget_id}",
     )
+    # Clear the recall slot once the widget has consumed it.
+    if st.session_state.recall_question:
+        st.session_state.recall_question = ""
 
     # Online-mode / Combined-mode: search configuration
     need_online = mode in (MODE_ONLINE, MODE_MIXED)
@@ -426,6 +551,8 @@ with tab_ask:
             "No PDF index available. Go to the **PDFs** tab and build an index first."
         )
 
+    just_streamed = False
+
     if st.button("🧠 Ask", type="primary"):
         if not research_question.strip():
             st.warning("Please enter a research question.")
@@ -443,6 +570,14 @@ with tab_ask:
             st.session_state.search_results = []
             st.session_state.search_errors = {}
 
+            # Push to history (dedup, cap at 12, most recent first)
+            hist: list = st.session_state.question_history
+            q = research_question.strip()
+            if q in hist:
+                hist.remove(q)
+            hist.insert(0, q)
+            del hist[12:]
+
             # Load / reuse vectorstore for PDF + Mixed modes
             vs = None
             if need_pdf:
@@ -457,40 +592,45 @@ with tab_ask:
                     st.error("FAISS index missing — rebuild it in the **PDFs** tab.")
                     st.stop()
 
-            # Run the mode
+            # Run the mode — streams tokens directly into the page
             try:
                 if mode == MODE_PDF:
-                    from utils.rag import query_rag
+                    from utils.rag import stream_rag
+                    st.divider()
+                    st.markdown("## 🧠 Answer")
+                    st.caption(f"Mode: **{mode}**")
                     with st.spinner(f"Querying {chain.primary.provider} over your PDFs…"):
-                        answer = query_rag(
+                        stream_iter = stream_rag(
                             research_question, vs, chain, citation_style
                         )
+                    answer = st.write_stream(stream_iter)
                     st.session_state.answer_text = answer
+                    just_streamed = True
 
                 elif mode == MODE_ONLINE:
                     with st.spinner(
                         f"Searching {len(selected_sources)} source(s) in parallel…"
                     ):
-                        papers, errors = multi_search(
-                            query, selected_sources, int(limit),
-                            min_year=st.session_state.get("min_year"),
-                            language=st.session_state.get("language"),
+                        papers, errors = _cached_search(
+                            query, selected_sources, int(limit), **_filter_kwargs()
                         )
                     st.session_state.search_results = papers
                     st.session_state.search_errors = errors
-                    if papers:
-                        with st.spinner(
-                            f"Re-ranking {len(papers)} papers & generating answer…"
-                        ):
-                            body, ranked = answer_from_papers(
-                                research_question, papers, chain, citation_style
-                            )
-                            st.session_state.answer_text = body
-                            st.session_state.answer_papers = ranked
-                    else:
-                        st.session_state.answer_text = (
-                            "No online papers returned for these keywords."
+                    for src, err in errors.items():
+                        st.warning(f"**{src}** failed: {err}")
+                    st.divider()
+                    st.markdown("## 🧠 Answer")
+                    st.caption(f"Mode: **{mode}**")
+                    with st.spinner(
+                        f"Re-ranking {len(papers)} papers & starting answer…"
+                    ):
+                        stream_iter, ranked = stream_from_papers(
+                            research_question, papers, chain
                         )
+                    answer = st.write_stream(stream_iter)
+                    st.session_state.answer_text = answer
+                    st.session_state.answer_papers = ranked
+                    just_streamed = True
 
                 elif mode == MODE_MIXED:
                     with st.spinner("Retrieving relevant PDF excerpts…"):
@@ -498,39 +638,51 @@ with tab_ask:
                     with st.spinner(
                         f"Searching {len(selected_sources)} source(s) in parallel…"
                     ):
-                        papers, errors = multi_search(
-                            query, selected_sources, int(limit),
-                            min_year=st.session_state.get("min_year"),
-                            language=st.session_state.get("language"),
+                        papers, errors = _cached_search(
+                            query, selected_sources, int(limit), **_filter_kwargs()
                         )
                     st.session_state.search_results = papers
                     st.session_state.search_errors = errors
+                    for src, err in errors.items():
+                        st.warning(f"**{src}** failed: {err}")
+                    st.divider()
+                    st.markdown("## 🧠 Answer")
+                    st.caption(f"Mode: **{mode}**")
                     with st.spinner("Blending PDF + online sources into answer…"):
-                        body, pdf_refs, ranked = answer_from_mixed(
-                            research_question, chunks, papers, chain, citation_style
+                        stream_iter, pdf_refs, ranked = stream_from_mixed(
+                            research_question, chunks, papers, chain
                         )
-                        st.session_state.answer_text = body
-                        st.session_state.answer_pdf_refs = pdf_refs
-                        st.session_state.answer_papers = ranked
+                    answer = st.write_stream(stream_iter)
+                    st.session_state.answer_text = answer
+                    st.session_state.answer_pdf_refs = pdf_refs
+                    st.session_state.answer_papers = ranked
+                    just_streamed = True
 
             except Exception as e:
                 import traceback
                 st.session_state.answer_text = (
-                    f"⚠️ **Answer generation failed:** {type(e).__name__}: {e}\n\n"
-                    f"```\n{traceback.format_exc()[-800:]}\n```"
+                    f"⚠️ **Answer generation failed:** {type(e).__name__}: {_scrub(str(e))}\n\n"
+                    f"```\n{_scrub(traceback.format_exc()[-800:])}\n```"
                 )
+                just_streamed = False
 
     # ── Render errors + answer ────────────────────────────────────────────────
-    for src, err in st.session_state.search_errors.items():
-        st.warning(f"**{src}** failed: {err}")
+    # Skip on the streaming run — they were already rendered above the answer.
+    if not just_streamed:
+        for src, err in st.session_state.search_errors.items():
+            st.warning(f"**{src}** failed: {err}")
 
     if st.session_state.answer_text:
-        st.divider()
-        _notify_fallback()
-        st.markdown("## 🧠 Answer")
-        answered_mode = st.session_state.answer_mode or mode
-        st.caption(f"Mode: **{answered_mode}**")
-        st.markdown(st.session_state.answer_text)
+        if not just_streamed:
+            st.divider()
+            _notify_fallback()
+            st.markdown("## 🧠 Answer")
+            answered_mode = st.session_state.answer_mode or mode
+            st.caption(f"Mode: **{answered_mode}**")
+            st.markdown(st.session_state.answer_text)
+        else:
+            # Header + body already streamed; just surface a fallback notice if any.
+            _notify_fallback()
 
         # References section — differs by mode
         pdf_refs = st.session_state.answer_pdf_refs
@@ -551,12 +703,23 @@ with tab_ask:
                 export_lines.append(f"[{ref.index}] PDF — {ref.filename}")
             for i, p in enumerate(online_refs, start=offset + 1):
                 export_lines.append(f"[{i}] {p.format_citation(citation_style)}")
-            st.download_button(
-                "📥 Export Answer + References",
-                data="\n".join(export_lines),
-                file_name=f"answer_{citation_style}.txt",
-                mime="text/plain",
-            )
+            exp_cols = st.columns(2)
+            with exp_cols[0]:
+                st.download_button(
+                    "📥 Export Answer + References (TXT)",
+                    data="\n".join(export_lines),
+                    file_name=f"answer_{citation_style}.txt",
+                    mime="text/plain",
+                )
+            with exp_cols[1]:
+                if online_refs:
+                    bib = "\n\n".join(p.to_bibtex() for p in online_refs)
+                    st.download_button(
+                        "📚 Export references (BibTeX)",
+                        data=bib,
+                        file_name="references.bib",
+                        mime="application/x-bibtex",
+                    )
 
     # ── All found online papers (online / combined modes) ────────────────────
     papers = st.session_state.search_results
@@ -578,23 +741,28 @@ with tab_ask:
         all_citations = "\n\n".join(
             f"[{i}] {p.format_citation(citation_style)}" for i, p in enumerate(papers, 1)
         )
-        st.download_button(
-            "📥 Export All Citations",
-            data=all_citations,
-            file_name=f"citations_{citation_style}.txt",
-            mime="text/plain",
-        )
+        all_bibtex = "\n\n".join(p.to_bibtex() for p in papers)
+        ec1, ec2 = st.columns(2)
+        with ec1:
+            st.download_button(
+                "📥 Export All Citations (TXT)",
+                data=all_citations,
+                file_name=f"citations_{citation_style}.txt",
+                mime="text/plain",
+            )
+        with ec2:
+            st.download_button(
+                "📚 Export All Citations (BibTeX)",
+                data=all_bibtex,
+                file_name="citations.bib",
+                mime="application/x-bibtex",
+            )
 
         with st.expander("Show all retrieved papers"):
             for i, paper in enumerate(papers, 1):
-                color = SOURCE_COLORS.get(paper.source, "#888")
-                badge = (
-                    f"<span style='background:{color};color:white;"
-                    f"padding:1px 7px;border-radius:3px;font-size:0.75em'>{paper.source}</span>"
-                )
                 year_str = f" ({paper.year})" if paper.year else ""
                 st.markdown(
-                    f"**{i}. {paper.title}**{year_str} &nbsp; {badge}",
+                    f"**{i}. {paper.title}**{year_str} &nbsp; {_badges(paper)}",
                     unsafe_allow_html=True,
                 )
                 m = st.columns(4)
@@ -725,10 +893,9 @@ with tab_verify:
                     with st.spinner(
                         f"Searching {len(v_selected_sources)} source(s) in parallel…"
                     ):
-                        online_papers, v_errors = multi_search(
+                        online_papers, v_errors = _cached_search(
                             v_query.strip(), v_selected_sources, int(v_limit),
-                            min_year=st.session_state.get("min_year"),
-                            language=st.session_state.get("language"),
+                            **_filter_kwargs(),
                         )
                     for src, err in v_errors.items():
                         st.warning(f"**{src}** failed: {err}")
@@ -747,9 +914,9 @@ with tab_verify:
 
             except Exception as e:
                 import traceback
-                st.error(f"**Evidence search failed:** {type(e).__name__}: {e}")
+                st.error(f"**Evidence search failed:** {type(e).__name__}: {_scrub(str(e))}")
                 with st.expander("Full traceback"):
-                    st.code(traceback.format_exc())
+                    st.code(_scrub(traceback.format_exc()))
 
     # ── Render evidence groups ────────────────────────────────────────────────
     evidence = st.session_state.verify_evidence
@@ -772,15 +939,9 @@ with tab_verify:
         def _render_evidence(ev: Evidence):
             if ev.kind == "paper" and ev.paper is not None:
                 citation = ev.paper.format_citation(citation_style)
-                color = SOURCE_COLORS.get(ev.paper.source, "#888")
-                badge = (
-                    f"<span style='background:{color};color:white;"
-                    f"padding:1px 6px;border-radius:3px;font-size:0.72em'>"
-                    f"{ev.paper.source}</span>"
-                )
                 link = f"[🔗 Open]({ev.paper.url})" if ev.paper.url else ""
                 st.markdown(
-                    f"**[{ev.index}]** {citation} &nbsp; {badge} &nbsp; {link}",
+                    f"**[{ev.index}]** {citation} &nbsp; {_badges(ev.paper)} &nbsp; {link}",
                     unsafe_allow_html=True,
                 )
             else:
@@ -864,6 +1025,11 @@ with tab_doi:
                 st.error("DOI not found in Crossref.")
             else:
                 st.success("DOI resolved successfully.")
+                if paper.is_retracted:
+                    st.error(
+                        "⚠️ **This paper has been retracted.** Do not cite it as "
+                        "supporting evidence — Crossref lists a retraction notice."
+                    )
                 st.markdown(f"**Title:** {paper.title}")
                 st.markdown(f"**Authors:** {', '.join(paper.authors)}")
                 st.markdown(f"**Year:** {paper.year}")

@@ -194,6 +194,33 @@ class LLMChain:
         assert last_exc is not None
         raise last_exc
 
+    def stream_chat(self, prompt, temperature: float = 0.1):
+        """Yield content chunks from the first config that doesn't hit quota.
+
+        Fallback only happens before the stream starts (initial call). Once a
+        chunk is yielded, errors propagate normally — we can't switch providers
+        mid-stream.
+        """
+        last_exc: BaseException | None = None
+        for i, cfg in enumerate(self.configs):
+            try:
+                llm = get_chat_llm(cfg, temperature=temperature)
+                stream = llm.stream(prompt)
+                self.last_used = cfg
+                self.fell_back = i > 0
+                for chunk in stream:
+                    text = getattr(chunk, "content", None) or ""
+                    if text:
+                        yield text
+                return
+            except Exception as e:
+                last_exc = e
+                if is_quota_error(e) and i + 1 < len(self.configs):
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
+
     def embed(self, question: str, documents: list[str]):
         """Embed question + documents with the SAME provider.
 

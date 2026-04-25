@@ -54,6 +54,7 @@ def _parse(w: dict) -> Paper:
         venue=venue or None,
         citation_count=w.get("cited_by_count"),
         language=(w.get("language") or None),
+        is_open_access=(w.get("open_access") or {}).get("is_oa"),
     )
 
 

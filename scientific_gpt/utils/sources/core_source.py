@@ -66,4 +66,5 @@ def _parse(w: dict) -> Paper:
         pdf_url=w.get("downloadUrl"),
         venue=w.get("journals", [{}])[0].get("title") if w.get("journals") else None,
         citation_count=None,
+        is_open_access=True,
     )

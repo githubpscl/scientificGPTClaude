@@ -6,7 +6,8 @@ _BASE = "https://api.crossref.org/works"
 _HEADERS = {"User-Agent": "ScientificGPT/1.0 (mailto:scientificgpt@research.app)"}
 SOURCE = "Crossref"
 
-_SELECT = "title,author,published,DOI,URL,abstract,container-title,is-referenced-by-count"
+_SELECT = ("title,author,published,DOI,URL,abstract,container-title,"
+           "is-referenced-by-count,update-to,subtype")
 
 
 def search(query: str, limit: int = 5) -> list[Paper]:
@@ -58,6 +59,17 @@ def _parse(item: dict) -> Paper:
     abstract_raw = item.get("abstract") or ""
     abstract = _strip_jats(abstract_raw) or None
 
+    # Retraction detection: Crossref lists `update-to` entries with a `type`
+    # field — "retraction" / "withdrawal" indicates the paper was retracted.
+    is_retracted = False
+    for upd in item.get("update-to") or []:
+        utype = (upd.get("type") or "").lower()
+        if "retract" in utype or "withdraw" in utype:
+            is_retracted = True
+            break
+    if (item.get("subtype") or "").lower() in ("retraction", "withdrawal"):
+        is_retracted = True
+
     return Paper(
         title=title,
         authors=authors,
@@ -68,6 +80,7 @@ def _parse(item: dict) -> Paper:
         doi=doi,
         venue=venue,
         citation_count=item.get("is-referenced-by-count"),
+        is_retracted=is_retracted,
     )
 
 

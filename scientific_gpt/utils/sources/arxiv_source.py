@@ -26,4 +26,5 @@ def _parse(r: arxiv.Result) -> Paper:
         venue="arXiv",
         citation_count=None,
         language="en",
+        is_open_access=True,
     )

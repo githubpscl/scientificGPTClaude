@@ -84,6 +84,26 @@ def retrieve_chunks(vectorstore: FAISS, question: str, k: int = 4):
     return vectorstore.similarity_search(question, k=k)
 
 
+def _build_rag_prompt(
+    question: str,
+    vectorstore: FAISS,
+    citation_style: str,
+    source_labels: list[str] | None,
+) -> str:
+    docs = vectorstore.similarity_search(question, k=4)
+    context_parts = []
+    for i, doc in enumerate(docs, 1):
+        label = (source_labels[i - 1] if source_labels and i - 1 < len(source_labels)
+                 else doc.metadata.get("source", f"Source {i}"))
+        context_parts.append(f"[{i}] ({label})\n{doc.page_content.strip()}")
+    context = "\n\n".join(context_parts)
+    return _SYSTEM.format(
+        citation_style=citation_style,
+        context=context,
+        question=question,
+    )
+
+
 def query_rag(
     question: str,
     vectorstore: FAISS,
@@ -91,20 +111,17 @@ def query_rag(
     citation_style: str = "APA",
     source_labels: list[str] | None = None,
 ) -> str:
-    docs = vectorstore.similarity_search(question, k=4)
-
-    context_parts = []
-    for i, doc in enumerate(docs, 1):
-        label = (source_labels[i - 1] if source_labels and i - 1 < len(source_labels)
-                 else doc.metadata.get("source", f"Source {i}"))
-        context_parts.append(f"[{i}] ({label})\n{doc.page_content.strip()}")
-
-    context = "\n\n".join(context_parts)
-
-    prompt = _SYSTEM.format(
-        citation_style=citation_style,
-        context=context,
-        question=question,
-    )
-
+    prompt = _build_rag_prompt(question, vectorstore, citation_style, source_labels)
     return chain.invoke_chat(prompt, temperature=0.1)
+
+
+def stream_rag(
+    question: str,
+    vectorstore: FAISS,
+    chain: LLMChain,
+    citation_style: str = "APA",
+    source_labels: list[str] | None = None,
+):
+    """Streaming variant of query_rag."""
+    prompt = _build_rag_prompt(question, vectorstore, citation_style, source_labels)
+    return chain.stream_chat(prompt, temperature=0.1)

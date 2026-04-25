@@ -66,14 +66,13 @@ class PdfRef:
     preview: str
 
 
-def answer_from_papers(
+def _build_papers_prompt(
     question: str,
     papers: list[Paper],
     chain: LLMChain,
-    citation_style: str = "APA",
-    max_papers: int = 8,
-) -> tuple[str, list[Paper]]:
-    """Filter → semantically rerank → generate cited answer from online papers only."""
+    max_papers: int,
+) -> tuple[str | None, list[Paper]]:
+    """Returns (prompt or None if no usable sources, ranked papers)."""
     substantive = filter_substantive(papers)
 
     if substantive:
@@ -87,33 +86,57 @@ def answer_from_papers(
         scores = [0.0] * len(ranked)
 
     if not ranked:
-        return ("The search returned no papers with sufficient metadata to answer "
-                "the question. Please refine the search keywords or try other sources."), []
+        return None, []
 
     source_blocks = _format_paper_blocks(ranked, scores, start_index=1)
-
-    prompt = _PROMPT.format(
+    return _PROMPT.format(
         sources="\n\n".join(source_blocks),
         question=question,
-    )
-
-    answer = chain.invoke_chat(prompt, temperature=0.1)
-    return answer, ranked
+    ), ranked
 
 
-def answer_from_mixed(
+def answer_from_papers(
+    question: str,
+    papers: list[Paper],
+    chain: LLMChain,
+    citation_style: str = "APA",
+    max_papers: int = 8,
+) -> tuple[str, list[Paper]]:
+    """Filter → semantically rerank → generate cited answer from online papers only."""
+    prompt, ranked = _build_papers_prompt(question, papers, chain, max_papers)
+    if prompt is None:
+        return ("The search returned no papers with sufficient metadata to answer "
+                "the question. Please refine the search keywords or try other sources."), []
+    return chain.invoke_chat(prompt, temperature=0.1), ranked
+
+
+def stream_from_papers(
+    question: str,
+    papers: list[Paper],
+    chain: LLMChain,
+    max_papers: int = 8,
+):
+    """Streaming variant: returns (token_iterator, ranked).
+
+    If no usable sources, the iterator yields a single fallback message.
+    """
+    prompt, ranked = _build_papers_prompt(question, papers, chain, max_papers)
+    if prompt is None:
+        def _empty():
+            yield ("The search returned no papers with sufficient metadata to "
+                   "answer the question. Please refine the search keywords or "
+                   "try other sources.")
+        return _empty(), []
+    return chain.stream_chat(prompt, temperature=0.1), ranked
+
+
+def _build_mixed_prompt(
     question: str,
     pdf_chunks: list,
     online_papers: list[Paper],
     chain: LLMChain,
-    citation_style: str = "APA",
-    max_online: int = 6,
-) -> tuple[str, list[PdfRef], list[Paper]]:
-    """Generate a cited answer combining PDF chunks and online papers.
-
-    Returns (answer_text, pdf_refs, ranked_online_papers). Citation numbers
-    run through PDFs first, then online papers.
-    """
+    max_online: int,
+) -> tuple[str | None, list[PdfRef], list[Paper]]:
     substantive = filter_substantive(online_papers)
     if substantive:
         ranked, scores = rerank(question, substantive, chain, top_k=max_online)
@@ -141,16 +164,50 @@ def answer_from_mixed(
     )
 
     if not source_blocks:
-        return ("No PDF chunks and no online papers were available. Upload PDFs "
-                "or refine the search keywords."), [], []
+        return None, [], []
 
     prompt = _MIXED_PROMPT.format(
         sources="\n\n".join(source_blocks),
         question=question,
     )
+    return prompt, pdf_refs, ranked
 
-    answer = chain.invoke_chat(prompt, temperature=0.1)
-    return answer, pdf_refs, ranked
+
+def answer_from_mixed(
+    question: str,
+    pdf_chunks: list,
+    online_papers: list[Paper],
+    chain: LLMChain,
+    citation_style: str = "APA",
+    max_online: int = 6,
+) -> tuple[str, list[PdfRef], list[Paper]]:
+    """Generate a cited answer combining PDF chunks and online papers."""
+    prompt, pdf_refs, ranked = _build_mixed_prompt(
+        question, pdf_chunks, online_papers, chain, max_online
+    )
+    if prompt is None:
+        return ("No PDF chunks and no online papers were available. Upload PDFs "
+                "or refine the search keywords."), [], []
+    return chain.invoke_chat(prompt, temperature=0.1), pdf_refs, ranked
+
+
+def stream_from_mixed(
+    question: str,
+    pdf_chunks: list,
+    online_papers: list[Paper],
+    chain: LLMChain,
+    max_online: int = 6,
+):
+    """Streaming variant: returns (token_iterator, pdf_refs, ranked)."""
+    prompt, pdf_refs, ranked = _build_mixed_prompt(
+        question, pdf_chunks, online_papers, chain, max_online
+    )
+    if prompt is None:
+        def _empty():
+            yield ("No PDF chunks and no online papers were available. "
+                   "Upload PDFs or refine the search keywords.")
+        return _empty(), [], []
+    return chain.stream_chat(prompt, temperature=0.1), pdf_refs, ranked
 
 
 def _format_paper_blocks(papers: list[Paper], scores: list[float], start_index: int) -> list[str]:
