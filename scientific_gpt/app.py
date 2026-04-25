@@ -13,6 +13,7 @@ from utils.search_engine import search as multi_search, available_sources, is_so
 from utils.sources.base import CITATION_STYLES, LANGUAGES
 from utils.sources.crossref import lookup_doi
 from utils.answer_engine import stream_from_papers, stream_from_mixed
+from utils.literature_review import stream_review
 from utils.claim_support import find_evidence, Evidence
 from utils.secrets_filter import scrub as _scrub
 from utils.llm_backend import (
@@ -51,6 +52,10 @@ for key, default in [
     ("question_history", []),     # list[str], most recent first, capped at 12
     ("rq_widget_id", 0),           # bumps to force textarea re-render on recall
     ("recall_question", ""),
+    ("review_text", None),
+    ("review_papers", []),
+    ("review_keywords", []),
+    ("review_topic", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -404,8 +409,8 @@ def _render_pdf_reference(ref):
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_pdfs, tab_ask, tab_verify, tab_doi = st.tabs(
-    ["📄 PDFs", "🔬 Ask", "✅ Verify Claim", "🔗 DOI Lookup"]
+tab_pdfs, tab_ask, tab_verify, tab_review, tab_doi = st.tabs(
+    ["📄 PDFs", "🔬 Ask", "✅ Verify Claim", "📚 Review", "🔗 DOI Lookup"]
 )
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -999,7 +1004,155 @@ with tab_verify:
         )
 
 # ════════════════════════════════════════════════════════════════════════════════
-# TAB 4 — DOI Lookup (Crossref)
+# TAB 4 — Literature Review
+# ════════════════════════════════════════════════════════════════════════════════
+with tab_review:
+    st.header("Generate a structured literature review")
+    st.caption(
+        "Provide a topic and search keywords. The app pulls papers from the "
+        "enabled online sources, re-ranks them, and drafts an academic review "
+        "with introduction, methods, findings, gaps, and future directions."
+    )
+
+    rv_topic = st.text_area(
+        "Review topic",
+        value=st.session_state.review_topic,
+        placeholder="e.g. Self-supervised pre-training for medical image segmentation",
+        height=80,
+        key="review_topic_input",
+    )
+
+    rv_selected_sources: list[str] = list(st.session_state.get("enabled_sources") or [])
+
+    col_q, col_n, col_m = st.columns([4, 1, 1])
+    with col_q:
+        rv_query = _keyword_input(
+            "Search keywords",
+            state_key="review_keywords",
+            placeholder="Type a keyword and press Enter",
+            help_text="Keywords used to retrieve candidate papers from the "
+                      "enabled databases.",
+        )
+    with col_n:
+        rv_limit = st.number_input(
+            "Per source", min_value=1, max_value=20, value=8, key="review_limit"
+        )
+    with col_m:
+        rv_max = st.number_input(
+            "Max in review", min_value=3, max_value=30, value=12, key="review_max",
+            help="Top-N papers (after re-ranking) to feed into the review.",
+        )
+
+    if rv_selected_sources:
+        st.caption(
+            "Sources: " + " · ".join(f"**{s}**" for s in rv_selected_sources)
+            + "  _(configure in sidebar → 🔎 Search Settings)_"
+        )
+    else:
+        st.info(
+            "No online sources are enabled. Open **🔎 Search Settings** in the "
+            "sidebar to enable at least one."
+        )
+
+    review_just_streamed = False
+
+    if st.button("📝 Generate Review", type="primary", key="review_btn"):
+        if not rv_topic.strip():
+            st.warning("Please enter a review topic.")
+        elif not rv_query.strip():
+            st.warning("Please enter at least one keyword.")
+        elif not rv_selected_sources:
+            st.warning("Please enable at least one online source.")
+        else:
+            st.session_state.review_text = None
+            st.session_state.review_papers = []
+            st.session_state.review_topic = rv_topic.strip()
+
+            try:
+                with st.spinner(
+                    f"Searching {len(rv_selected_sources)} source(s) in parallel…"
+                ):
+                    papers, errors = _cached_search(
+                        rv_query, rv_selected_sources, int(rv_limit),
+                        **_filter_kwargs(),
+                    )
+                for src, err in errors.items():
+                    st.warning(f"**{src}** failed: {err}")
+
+                if not papers:
+                    st.info("No papers returned. Refine the keywords or enable more sources.")
+                else:
+                    st.divider()
+                    st.markdown(f"## 📚 Literature Review — *{rv_topic.strip()}*")
+                    with st.spinner(
+                        f"Re-ranking {len(papers)} papers & drafting review…"
+                    ):
+                        stream_iter, ranked = stream_review(
+                            rv_topic.strip(), papers, chain, max_papers=int(rv_max)
+                        )
+                    body = st.write_stream(stream_iter)
+                    st.session_state.review_text = body
+                    st.session_state.review_papers = ranked
+                    review_just_streamed = True
+
+            except Exception as e:
+                import traceback
+                st.session_state.review_text = (
+                    f"⚠️ **Review generation failed:** {type(e).__name__}: "
+                    f"{_scrub(str(e))}\n\n```\n{_scrub(traceback.format_exc()[-800:])}\n```"
+                )
+                review_just_streamed = False
+
+    # ── Render persisted review ──────────────────────────────────────────────
+    if st.session_state.review_text:
+        if not review_just_streamed:
+            st.divider()
+            _notify_fallback()
+            st.markdown(
+                f"## 📚 Literature Review — *{st.session_state.review_topic}*"
+            )
+            st.markdown(st.session_state.review_text)
+        else:
+            _notify_fallback()
+
+        rv_refs = st.session_state.review_papers
+        if rv_refs:
+            st.markdown("---")
+            st.markdown("## References")
+            for i, p in enumerate(rv_refs, 1):
+                _render_online_reference(i, p, citation_style)
+
+            export_lines = [
+                f"# Literature Review — {st.session_state.review_topic}",
+                "",
+                st.session_state.review_text,
+                "",
+                "## References",
+                "",
+            ]
+            for i, p in enumerate(rv_refs, 1):
+                export_lines.append(f"[{i}] {p.format_citation(citation_style)}")
+            ec1, ec2 = st.columns(2)
+            with ec1:
+                st.download_button(
+                    "📥 Export Review (TXT)",
+                    data="\n".join(export_lines),
+                    file_name=f"literature_review_{citation_style}.txt",
+                    mime="text/plain",
+                    key="review_dl_txt",
+                )
+            with ec2:
+                bib = "\n\n".join(p.to_bibtex() for p in rv_refs)
+                st.download_button(
+                    "📚 Export references (BibTeX)",
+                    data=bib,
+                    file_name="literature_review.bib",
+                    mime="application/x-bibtex",
+                    key="review_dl_bib",
+                )
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 5 — DOI Lookup (Crossref)
 # ════════════════════════════════════════════════════════════════════════════════
 with tab_doi:
     st.header("DOI Lookup & Citation Validator")
